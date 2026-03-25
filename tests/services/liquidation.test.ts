@@ -114,6 +114,8 @@ vi.mock('@percolator/shared', () => ({
     sendRawTransaction: vi.fn(async () => 'mock-tx-signature'),
   })),
   backoffMs: vi.fn(() => 100),
+  getErrorMessage: vi.fn((err: unknown) => err instanceof Error ? err.message : String(err)),
+  sendWithRetryKeeper: vi.fn(async () => 'mock-keeper-signature'),
 }));
 
 import { PublicKey, ComputeBudgetProgram } from '@solana/web3.js';

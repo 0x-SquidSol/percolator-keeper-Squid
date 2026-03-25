@@ -47,8 +47,10 @@ vi.mock('@percolator/shared', () => ({
     secretKey: new Uint8Array(64),
   })),
   sendWithRetry: vi.fn(async () => 'mock-signature-' + Date.now()),
-  rateLimitedCall: vi.fn((fn) => fn()),
+  sendWithRetryKeeper: vi.fn(async () => 'mock-keeper-signature-' + Date.now()),
+  rateLimitedCall: vi.fn((fn: any) => fn()),
   sendCriticalAlert: vi.fn(),
+  getErrorMessage: vi.fn((err: unknown) => err instanceof Error ? err.message : String(err)),
   eventBus: {
     publish: vi.fn(),
   },
@@ -193,7 +195,7 @@ describe('CrankService', () => {
       const result = await crankService.crankMarket(slabAddress);
 
       expect(result).toBe(true);
-      expect(shared.sendWithRetry).toHaveBeenCalled();
+      expect(shared.sendWithRetryKeeper).toHaveBeenCalled();
       
       const state = crankService.getMarkets().get(slabAddress);
       expect(state?.successCount).toBe(1);
@@ -218,7 +220,7 @@ describe('CrankService', () => {
       vi.mocked(core.discoverMarkets).mockResolvedValue([mockMarket] as any);
       await crankService.discover();
 
-      vi.mocked(shared.sendWithRetry).mockRejectedValue(new Error('Transaction failed'));
+      vi.mocked(shared.sendWithRetryKeeper).mockRejectedValue(new Error('Transaction failed'));
 
       const result = await crankService.crankMarket(slabAddress);
 
@@ -254,14 +256,14 @@ describe('CrankService', () => {
       vi.setSystemTime(startTime);
 
       // One successful crank to set lastCrankTime
-      vi.mocked(shared.sendWithRetry).mockResolvedValue('initial-success');
+      vi.mocked(shared.sendWithRetryKeeper).mockResolvedValue('initial-success');
       await crankService.crankMarket(slabAddress);
       const stateAfterSuccess = crankService.getMarkets().get(slabAddress)!;
       expect(stateAfterSuccess.isActive).toBe(true);
       expect(stateAfterSuccess.lastCrankTime).toBeCloseTo(startTime, -2);
 
       // Now fail 10 consecutive times → market becomes inactive
-      vi.mocked(shared.sendWithRetry).mockRejectedValue(new Error('Transaction failed'));
+      vi.mocked(shared.sendWithRetryKeeper).mockRejectedValue(new Error('Transaction failed'));
       for (let i = 0; i < 10; i++) {
         await crankService.crankMarket(slabAddress);
       }
@@ -308,7 +310,7 @@ describe('CrankService', () => {
       vi.mocked(core.discoverMarkets).mockResolvedValue([mockMarket] as any);
       await crankService.discover();
 
-      vi.mocked(shared.sendWithRetry).mockRejectedValue(new Error('Transaction failed'));
+      vi.mocked(shared.sendWithRetryKeeper).mockRejectedValue(new Error('Transaction failed'));
 
       // Fail 10 times
       for (let i = 0; i < 10; i++) {
