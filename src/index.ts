@@ -52,10 +52,19 @@ const healthServer = http.createServer((req, res) => {
   // Body: { slabAddress: string, mainnetCA?: string }
   // Auth: requires x-shared-secret header matching KEEPER_REGISTER_SECRET env var (defense-in-depth; #780)
   if (req.url === "/register" && req.method === "POST") {
+    // GH#19: rejectEarly() calls req.resume() before responding so the socket is
+    // drained without buffering the full body. Without this, an attacker that sends
+    // a large POST body to the 503/401 paths would exhaust memory since Node.js
+    // keeps buffering until the connection times out.
+    const rejectEarly = (status: number, message: string) => {
+      req.resume(); // drain socket — prevents memory exhaustion on unauthenticated large bodies
+      res.writeHead(status, { "Content-Type": "application/json", "Connection": "close" });
+      res.end(JSON.stringify({ success: false, message }));
+    };
+
     const registerSecret = process.env.KEEPER_REGISTER_SECRET ?? "";
     if (!registerSecret) {
-      res.writeHead(503, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ success: false, message: "Endpoint not configured" }));
+      rejectEarly(503, "Endpoint not configured");
       return;
     }
     const provided = String(req.headers["x-shared-secret"] ?? "");
@@ -66,8 +75,7 @@ const healthServer = http.createServer((req, res) => {
       secretBuf.length === providedBuf.length &&
       timingSafeEqual(secretBuf, providedBuf);
     if (!authed) {
-      res.writeHead(401, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ success: false, message: "Unauthorized" }));
+      rejectEarly(401, "Unauthorized");
       return;
     }
     // Body size limit: 4 KB max to prevent memory exhaustion
