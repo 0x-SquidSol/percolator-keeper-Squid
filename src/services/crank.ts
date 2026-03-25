@@ -2,13 +2,20 @@ import { PublicKey, SYSVAR_CLOCK_PUBKEY } from "@solana/web3.js";
 import {
   discoverMarkets,
   encodeKeeperCrank,
+  encodePushOraclePrice,
   buildAccountMetas,
   buildIx,
   derivePythPushOraclePDA,
   ACCOUNTS_KEEPER_CRANK,
+  ACCOUNTS_PUSH_ORACLE_PRICE,
+  fetchSlab,
+  parseHeader,
+  parseConfig,
+  parseEngine,
+  parseParams,
   type DiscoveredMarket,
 } from "@percolator/sdk";
-import { config, getConnection, getFallbackConnection, loadKeypair, sendWithRetry, rateLimitedCall, eventBus, createLogger, sendCriticalAlert } from "@percolator/shared";
+import { config, getConnection, getFallbackConnection, loadKeypair, sendWithRetry, sendWithRetryKeeper, rateLimitedCall, eventBus, createLogger, sendCriticalAlert } from "@percolator/shared";
 import { OracleService } from "./oracle.js";
 
 const logger = createLogger("keeper:crank");
@@ -25,6 +32,29 @@ interface MarketCrankState {
   missingDiscoveryCount: number;
   /** Permanently skip — market is not initialized on-chain (error 0x4) */
   permanentlySkipped?: boolean;
+  /** Timestamp when the market was first permanently skipped (for cooldown) */
+  permanentlySkippedAt?: number;
+  /** How many times this market has been skipped for 0x4 across rediscoveries */
+  skipCount?: number;
+  /**
+   * PERC-465: Mainnet CA override for price lookups.
+   * On devnet Quick Launch markets, collateralMint is a devnet mirror mint with no DEX data.
+   * This field stores the original mainnet CA so Jupiter/DexScreener lookups use the right address.
+   */
+  mainnetCA?: string;
+  /**
+   * GH#1508: Admin-oracle market where the keeper is NOT the oracle authority.
+   * The market owner must push prices themselves — we can't crank without a valid oracle price.
+   * Cranking these causes OracleInvalid (0xc) errors. Skip until authority changes.
+   * Unlike permanentlySkipped (0x4), this is re-checked on each discovery cycle.
+   */
+  foreignOracleSkipped?: boolean;
+  /**
+   * PERC-1254: Hyperp-mode market (indexFeedId=all-zeros) where authority_price_e6=0 on-chain
+   * and fetchPrice returned null — cranking would cause OracleInvalid (0xc).
+   * Reset to false once a price push succeeds or on-chain price is non-zero.
+   */
+  hyperpNoPriceSkipped?: boolean;
 }
 
 /** Process items in batches with delay between batches.
@@ -88,23 +118,70 @@ export class CrankService {
     return this._isRunning;
   }
 
+  /**
+   * PERC-1650: Per-program 429 retry backoff for discoverMarkets calls.
+   * Escalating delays: 2s → 6s → 18s → 54s before giving up.
+   * Applied at the program level (outer loop) in addition to the per-tier 429 retry
+   * inside discoverMarkets itself (when sequential=true).
+   */
+  private static readonly DISCOVER_429_BACKOFF_MS = [2_000, 6_000, 18_000, 54_000];
+
+  /** Add up to 25% jitter to avoid thundering herd on retry. */
+  private static jitter(ms: number): number {
+    return ms + Math.floor(Math.random() * ms * 0.25);
+  }
+
   async discover(): Promise<DiscoveredMarket[]> {
     const programIds = config.allProgramIds;
     logger.info("Discovering markets", { programCount: programIds.length });
-    // Use fallback RPC for discovery (Helius rate-limits getProgramAccounts)
-    // Sequential calls with delay to avoid 429 from public RPC
+    // Use fallback RPC for discovery (Helius rate-limits getProgramAccounts).
+    // PERC-1650: Pass sequential=true so the SDK fires one tier query at a time with
+    // per-tier 429 retry + inter-tier spacing (200ms), avoiding the 14-query parallel
+    // burst that caused repeated 429s on every scan cycle.
     const discoveryConn = getFallbackConnection();
     const allFound: DiscoveredMarket[] = [];
-    for (const id of programIds) {
-      try {
-        const found = await discoverMarkets(discoveryConn, new PublicKey(id));
-        logger.debug("Program scan complete", { programId: id, marketCount: found.length });
-        allFound.push(...found);
-      } catch (e) {
-        logger.warn("Program scan failed", { programId: id, error: e });
+    for (let progIdx = 0; progIdx < programIds.length; progIdx++) {
+      const id = programIds[progIdx];
+      let found: DiscoveredMarket[] = [];
+      let programSuccess = false;
+
+      for (let attempt = 0; attempt <= CrankService.DISCOVER_429_BACKOFF_MS.length; attempt++) {
+        try {
+          found = await discoverMarkets(discoveryConn, new PublicKey(id), {
+            sequential: true,
+            interTierDelayMs: 200,
+            rateLimitBackoffMs: [1_000, 3_000, 9_000, 27_000],
+          });
+          programSuccess = true;
+          logger.debug("Program scan complete", { programId: id, marketCount: found.length });
+          break;
+        } catch (e) {
+          const is429 =
+            e instanceof Error &&
+            (e.message.includes("429") ||
+              e.message.toLowerCase().includes("rate limit") ||
+              e.message.toLowerCase().includes("too many requests"));
+          if (is429 && attempt < CrankService.DISCOVER_429_BACKOFF_MS.length) {
+            const delay = CrankService.jitter(CrankService.DISCOVER_429_BACKOFF_MS[attempt]);
+            logger.warn("429 on discoverMarkets — backing off at program level", {
+              programId: id,
+              attempt: attempt + 1,
+              delayMs: delay,
+            });
+            await new Promise(r => setTimeout(r, delay));
+            continue;
+          }
+          logger.warn("Program scan failed", { programId: id, error: e, attempt: attempt + 1 });
+          break;
+        }
       }
-      // 2s delay between programs to avoid rate limits
-      if (programIds.indexOf(id) < programIds.length - 1) {
+
+      if (programSuccess) {
+        allFound.push(...found);
+      }
+
+      // Inter-program spacing: 2s base, helps avoid consecutive 429s on multi-program configs.
+      if (progIdx < programIds.length - 1) {
         await new Promise((r) => setTimeout(r, 2_000));
       }
     }
@@ -130,11 +207,41 @@ export class CrankService {
         const state = this.markets.get(key)!;
         state.market = market;
         state.missingDiscoveryCount = 0;
-        // Re-enable permanently skipped markets on rediscovery (may have been initialized since)
-        if (state.permanentlySkipped) {
-          state.permanentlySkipped = false;
-          state.consecutiveFailures = 0;
-          logger.info("Re-enabling previously skipped market", { slabAddress: key });
+        // GH#1508: Reset foreignOracleSkipped on re-discovery — oracle authority may have changed.
+        // crankMarket() will re-check and re-set it if the keeper is still not the authority.
+        if (state.foreignOracleSkipped) {
+          state.foreignOracleSkipped = false;
+          logger.debug("Re-checking foreign oracle skip on rediscovery", { slabAddress: key });
+        }
+        // PERC-1254: Reset hyperpNoPriceSkipped on re-discovery so we retry fetchPrice.
+        // Oracle data may have become available since the last skip (e.g. DEX pool created).
+        if (state.hyperpNoPriceSkipped) {
+          state.hyperpNoPriceSkipped = false;
+          logger.debug("PERC-1254: Re-checking Hyperp no-price skip on rediscovery", { slabAddress: key });
+        }
+        // PERC-381: Only re-enable permanently skipped (0x4) markets after a long cooldown
+        // to avoid crank→skip→rediscover→re-enable→crank thrash loop on stale slabs.
+        // Cooldown increases exponentially with skip count (1h, 2h, 4h, ... capped at 24h).
+        if (state.permanentlySkipped && state.permanentlySkippedAt) {
+          const skipCount = state.skipCount ?? 1;
+          const cooldownMs = Math.min(skipCount * 3_600_000, 24 * 3_600_000); // 1h per skip, max 24h
+          const elapsed = Date.now() - state.permanentlySkippedAt;
+          if (elapsed >= cooldownMs) {
+            state.permanentlySkipped = false;
+            state.consecutiveFailures = 0;
+            logger.info("Re-enabling permanently skipped market after cooldown", {
+              slabAddress: key,
+              cooldownMs,
+              skipCount,
+              elapsedMs: elapsed,
+            });
+          } else {
+            logger.debug("Permanently skipped market still in cooldown", {
+              slabAddress: key,
+              remainingMs: cooldownMs - elapsed,
+              skipCount,
+            });
+          }
         }
       }
     }
@@ -173,20 +280,87 @@ export class CrankService {
     const { market } = state;
 
     try {
-      if (this.isAdminOracle(market)) {
+      const connection = getConnection();
+      const keypair = loadKeypair(process.env.CRANK_KEYPAIR!);
+      const programId = market.programId;
+
+      // GH#1508: Skip admin-oracle markets where we are NOT the oracle authority.
+      // Cranking without a valid oracle price causes OracleInvalid (0xc). The market
+      // owner must push prices themselves; the keeper has no authority here.
+      if (this.isAdminOracle(market) && !keypair.publicKey.equals(market.config.oracleAuthority)) {
+        if (!state.foreignOracleSkipped) {
+          state.foreignOracleSkipped = true;
+          logger.warn("Skipping admin-oracle market — keeper is not the oracle authority (would cause OracleInvalid 0xc). " +
+            "The market creator must push prices. Suppressing further crank attempts.", {
+            slabAddress,
+            oracleAuthority: market.config.oracleAuthority.toBase58(),
+            keeperKey: keypair.publicKey.toBase58(),
+            programId: programId.toBase58(),
+          });
+        }
+        return false;
+      }
+
+      // PERC-204: Build all instructions into a single transaction bundle
+      const instructions = [];
+
+      // PERC-204: Bundle oracle price push with crank tx (eliminates separate oracle tx round-trip)
+      // Only push if we are the oracle authority for this market
+      let pricePushQueued = false;
+      if (this.isAdminOracle(market) && keypair.publicKey.equals(market.config.oracleAuthority)) {
         try {
-          await this.oracleService.pushPrice(slabAddress, market.config, market.programId);
+          // PERC-465: Use mainnetCA if available (devnet mirror mint markets), else collateralMint.
+          // Fresh devnet mints have no DEX liquidity so Jupiter/DexScreener lookups fail for them.
+          const mint = state.mainnetCA ?? market.config.collateralMint.toBase58();
+          const priceEntry = await this.oracleService.fetchPrice(mint, slabAddress);
+          if (priceEntry) {
+            const pushData = encodePushOraclePrice({
+              priceE6: priceEntry.priceE6,
+              timestamp: BigInt(Math.floor(Date.now() / 1000)),
+            });
+            const pushKeys = buildAccountMetas(ACCOUNTS_PUSH_ORACLE_PRICE, [
+              keypair.publicKey, market.slabAddress,
+            ]);
+            instructions.push(buildIx({ programId, keys: pushKeys, data: pushData }));
+            pricePushQueued = true;
+          }
         } catch (priceErr) {
-          // Non-fatal: oracle authority may be the market admin, not the crank.
-          logger.warn("Price push skipped", { slabAddress, error: priceErr instanceof Error ? priceErr.message : String(priceErr) });
+          // Non-fatal: price fetch failed, crank will still run with existing on-chain price
+          logger.warn("Price push skipped (bundled)", { slabAddress, error: priceErr instanceof Error ? priceErr.message : String(priceErr) });
         }
       }
 
-      const connection = getConnection();
-      const keypair = loadKeypair(config.crankKeypair);
-      const programId = market.programId;
+      // PERC-1254: Hyperp-mode guard — only applies to admin-oracle markets where the keeper
+      // IS the oracle authority (already confirmed above).  indexFeedId = all-zeros means the
+      // program reads authority_price_e6 as the oracle price.  If no price push succeeded this
+      // cycle AND the on-chain authority_price_e6 is still 0 (never been set), the KeeperCrank
+      // instruction will return OracleInvalid (0xc).  Skip the crank to avoid the failure
+      // cascade.  The market will be retried every interval, so it becomes crankable as
+      // soon as fetchPrice returns a valid price and the push succeeds.
+      // Use toBytes() for the zero-check so this works with both real PublicKey objects and mocks.
+      const isHyperpMode = this.isAdminOracle(market) &&
+        keypair.publicKey.equals(market.config.oracleAuthority) &&
+        market.config.indexFeedId.toBytes().every((b: number) => b === 0);
+      if (isHyperpMode && !pricePushQueued && (market.config.authorityPriceE6 ?? BigInt(0)) === BigInt(0)) {
+        if (!state.hyperpNoPriceSkipped) {
+          state.hyperpNoPriceSkipped = true;
+          logger.warn("PERC-1254: Skipping Hyperp-mode market — no price available and on-chain authority_price_e6=0. " +
+            "Cranking would cause OracleInvalid (0xc). Will retry when fetchPrice succeeds.", {
+            slabAddress,
+            oracleAuthority: market.config.oracleAuthority.toBase58(),
+            lastEffectivePriceE6: market.config.lastEffectivePriceE6.toString(),
+          });
+        }
+        return false;
+      }
+      // Clear the flag once we have a price (either freshly pushed or already on-chain)
+      if (state.hyperpNoPriceSkipped && (pricePushQueued || (market.config.authorityPriceE6 ?? BigInt(0)) > BigInt(0))) {
+        state.hyperpNoPriceSkipped = false;
+        logger.info("PERC-1254: Hyperp market now has a price — resuming cranks", { slabAddress });
+      }
 
-      const data = encodeKeeperCrank({ callerIdx: 65535, allowPanic: false });
+      // Crank instruction
+      const crankData = encodeKeeperCrank({ callerIdx: 65535, allowPanic: false });
 
       let oracleKey: PublicKey;
       if (this.isAdminOracle(market)) {
@@ -197,15 +371,16 @@ export class CrankService {
         oracleKey = derivePythPushOraclePDA(feedHex)[0];
       }
 
-      const keys = buildAccountMetas(ACCOUNTS_KEEPER_CRANK, [
+      const crankKeys = buildAccountMetas(ACCOUNTS_KEEPER_CRANK, [
         keypair.publicKey,
         market.slabAddress,
         SYSVAR_CLOCK_PUBKEY,
         oracleKey,
       ]);
+      instructions.push(buildIx({ programId, keys: crankKeys, data: crankData }));
 
-      const ix = buildIx({ programId, keys, data });
-      const sig = await sendWithRetry(connection, ix, [keypair]);
+      // PERC-204: Use keeper-optimized send (skipPreflight + multi-RPC + tight CU)
+      const sig = await sendWithRetryKeeper(connection, instructions, [keypair]);
 
       // BC1: Track signature to prevent replay attacks
       const now = Date.now();
@@ -230,13 +405,18 @@ export class CrankService {
       state.consecutiveFailures++;
 
       // Detect NotInitialized (error 0x4) — permanently skip these markets
+      // PERC-381: Track skip count and timestamp for exponential cooldown on rediscovery
       const errMsg = err instanceof Error ? err.message : String(err);
       if (errMsg.includes("custom program error: 0x4")) {
         state.permanentlySkipped = true;
+        state.permanentlySkippedAt = Date.now();
+        state.skipCount = (state.skipCount ?? 0) + 1;
         state.isActive = false;
-        logger.warn("Market not initialized on-chain, permanently skipping", {
+        logger.warn("Market slab size mismatch (0x4 InvalidSlabLen) — permanently skipping. " +
+          "Fix: run `npx tsx scripts/reinit-slab.ts --slab <ADDRESS>` to recreate with correct size.", {
           slabAddress,
           programId: market.programId.toBase58(),
+          skipCount: state.skipCount,
         });
         return false;
       }
@@ -272,40 +452,107 @@ export class CrankService {
   }
 
   async crankAll(): Promise<{ success: number; failed: number; skipped: number }> {
-    let success = 0;
-    let failed = 0;
-    let skipped = 0;
+  let success = 0;
+  let failed = 0;
 
-    const MAX_CONSECUTIVE_FAILURES = 10;
+  // NEW: split skipped into categories
+  let skippedPermanent = 0;
+  let skippedForeignOracle = 0;
+  let skippedHyperpNoPrice = 0;
+  let skippedFailures = 0;
+  let skippedNotDue = 0;
 
-    const toCrank: string[] = [];
+  const MAX_CONSECUTIVE_FAILURES = 10;
 
-    // H5: Crank all discovered markets, not just admin-oracle ones
-    for (const [slabAddress, state] of this.markets) {
-      if (state.permanentlySkipped) {
-        skipped++;
+  // GH#1251: Load the keeper key once here so we can check authority live.
+  // We re-evaluate foreign oracle authority at crankAll time rather than relying on
+  // state.foreignOracleSkipped.  After discover() resets the flag, crankMarket() would
+  // return false (and set failed++) instead of skipped.  Checking here means those markets
+  // are categorised as skipped before they even enter the crank queue.
+  const keeperKey = loadKeypair(process.env.CRANK_KEYPAIR!).publicKey;
+
+  const toCrank: string[] = [];
+
+  for (const [slabAddress, state] of this.markets) {
+    if (state.permanentlySkipped) {
+      skippedPermanent++;
+      continue;
+    }
+    // GH#1251: Live authority check — covers both the steady-state case (flag already set)
+    // and the post-discover() window where the flag was just reset.
+    // Any admin-oracle market where the keeper is NOT the oracle authority is always skipped.
+    if (
+      this.isAdminOracle(state.market) &&
+      !keeperKey.equals(state.market.config.oracleAuthority)
+    ) {
+      // Keep the flag in sync so crankMarket() also fast-paths correctly.
+      if (!state.foreignOracleSkipped) {
+        state.foreignOracleSkipped = true;
+        logger.debug("crankAll: re-skipping foreign oracle market (flag was reset by discover)", { slabAddress });
+      }
+      skippedForeignOracle++;
+      continue;
+    }
+    // PERC-1254: Live Hyperp-no-price check.
+    // Condition: admin-oracle market where keeper IS the authority, indexFeedId=all-zeros
+    // (Hyperp mode), and on-chain authority_price_e6 is still 0.  Sending KeeperCrank in
+    // this state causes OracleInvalid (0xc).  Skip eagerly — crankMarket() would return
+    // false and the batch counts it as failed rather than skipped.
+    // The flag (state.hyperpNoPriceSkipped) is set here for the first time on new markets
+    // so crankMarket's guard also short-circuits on subsequent calls.
+    {
+      const isHyperpAdminOwner =
+        this.isAdminOracle(state.market) &&
+        keeperKey.equals(state.market.config.oracleAuthority) &&
+        state.market.config.indexFeedId.toBytes().every((b: number) => b === 0);
+      const onChainPriceZero = (state.market.config.authorityPriceE6 ?? BigInt(0)) === BigInt(0);
+      if (isHyperpAdminOwner && onChainPriceZero) {
+        if (!state.hyperpNoPriceSkipped) {
+          state.hyperpNoPriceSkipped = true;
+          logger.debug("crankAll: Hyperp-mode market with zero authority_price_e6 — skipping to prevent OracleInvalid (0xc)", { slabAddress });
+        }
+        skippedHyperpNoPrice++;
         continue;
       }
-      if (state.consecutiveFailures > MAX_CONSECUTIVE_FAILURES) {
-        skipped++;
-        continue;
-      }
-
-      if (!this.isDue(state)) {
-        skipped++;
-        continue;
-      }
-
-      toCrank.push(slabAddress);
     }
 
-    if (toCrank.length !== this.markets.size - skipped) {
-      logger.warn("Crank mismatch", { totalMarkets: this.markets.size, toCrank: toCrank.length, skipped });
+    if (state.consecutiveFailures > MAX_CONSECUTIVE_FAILURES) {
+      skippedFailures++;
+      continue;
     }
+    if (!this.isDue(state)) {
+      skippedNotDue++;
+      continue;
+    }
+    toCrank.push(slabAddress);
+  }
 
-    // Process in batches of 3 with 2s gaps between batches
-    // BM7: Collect per-market error tracking
-    const batchResult = await processBatched(toCrank, 3, 2_000, async (slabAddress) => {
+  // NEW: meaningful accounting check
+  const skipped = skippedPermanent + skippedForeignOracle + skippedHyperpNoPrice + skippedFailures + skippedNotDue;
+  const total = this.markets.size;
+  const accounted = toCrank.length + skipped;
+
+  if (accounted !== total) {
+    logger.warn("Crank accounting mismatch", {
+      totalMarkets: total,
+      toCrank: toCrank.length,
+      skipped,
+      skippedPermanent,
+      skippedForeignOracle,
+      skippedHyperpNoPrice,
+      skippedFailures,
+      skippedNotDue,
+    });
+  }
+
+    // PERC-204: Full parallel fan-out — all market cranks are independent transactions,
+    // submit them all simultaneously instead of in sequential batches.
+    // Each market gets its own transaction with independent nonce/blockhash.
+    // The Solana network de-dupes by signature, so parallel submission is safe.
+    const PARALLEL_CONCURRENCY = 10; // Cap concurrency to avoid rate limit storms
+
+    // Process in parallel batches (larger batches, no delay between)
+    const batchResult = await processBatched(toCrank, PARALLEL_CONCURRENCY, 500, async (slabAddress) => {
       const ok = await this.crankMarket(slabAddress);
       if (ok) success++;
       else failed++;
@@ -313,9 +560,10 @@ export class CrankService {
 
     // BM7: Log detailed error summary if any failed
     if (batchResult.failed > 0) {
-      logger.error("Batch completed with errors", { 
+      logger.error("Parallel crank batch completed with errors", { 
         failedCount: batchResult.failed,
-        successCount: success
+        successCount: success,
+        parallelism: PARALLEL_CONCURRENCY,
       });
       for (const [slab, error] of batchResult.errors) {
         logger.error("Batch error detail", { slabAddress: slab, error: error.message });
@@ -324,6 +572,78 @@ export class CrankService {
 
     this.lastCycleResult = { success, failed, skipped };
     return { success, failed, skipped };
+  }
+
+  /**
+   * Hot-register a freshly created market without waiting for the next discovery cycle.
+   * Fetches slab data on-chain, adds to the tracked markets map, and triggers an
+   * immediate crank so the price is pushed to the new market within seconds.
+   *
+   * @param slabAddress - The slab account address on-chain
+   * @param mainnetCA   - Optional mainnet CA for price lookups (for devnet mirror mint markets)
+   *
+   * Called by the /register HTTP endpoint when the frontend creates a new market.
+   */
+  async registerMarket(slabAddress: string, mainnetCA?: string): Promise<{ success: boolean; message: string }> {
+    if (this.markets.has(slabAddress)) {
+      // Update mainnetCA even if already tracked (registration may have been partial)
+      if (mainnetCA) {
+        const existing = this.markets.get(slabAddress)!;
+        existing.mainnetCA = mainnetCA;
+      }
+      logger.info("Market already tracked, skipping hot-register", { slabAddress });
+      return { success: true, message: "Market already tracked" };
+    }
+
+    const connection = getConnection();
+    const slabPubkey = new PublicKey(slabAddress);
+
+    let info: Awaited<ReturnType<typeof connection.getAccountInfo>>;
+    try {
+      info = await connection.getAccountInfo(slabPubkey);
+    } catch (err) {
+      const msg = `RPC error fetching slab: ${err instanceof Error ? err.message : String(err)}`;
+      logger.error(msg, { slabAddress });
+      return { success: false, message: msg };
+    }
+
+    if (!info) {
+      return { success: false, message: `Slab account not found: ${slabAddress}` };
+    }
+
+    const data = new Uint8Array(info.data);
+    const programId = info.owner;
+
+    try {
+      const header = parseHeader(data);
+      const marketConfig = parseConfig(data);
+      const engine = parseEngine(data);
+      const params = parseParams(data);
+
+      const market: DiscoveredMarket = { slabAddress: slabPubkey, programId, header, config: marketConfig, engine, params };
+
+      this.markets.set(slabAddress, {
+        market,
+        lastCrankTime: 0,
+        successCount: 0,
+        failureCount: 0,
+        consecutiveFailures: 0,
+        isActive: true,
+        missingDiscoveryCount: 0,
+        mainnetCA,
+      });
+
+      logger.info("Hot-registered new market", { slabAddress, programId: programId.toBase58() });
+
+      // Trigger immediate oracle push + crank so price is live within seconds
+      await this.crankMarket(slabAddress);
+
+      return { success: true, message: "Market registered and initial crank triggered" };
+    } catch (err) {
+      const msg = `Failed to parse slab: ${err instanceof Error ? err.message : String(err)}`;
+      logger.error(msg, { slabAddress });
+      return { success: false, message: msg };
+    }
   }
 
   start(): void {

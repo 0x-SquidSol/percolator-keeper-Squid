@@ -18,7 +18,7 @@ import {
   derivePythPushOraclePDA,
   type DiscoveredMarket,
 } from "@percolator/sdk";
-import { config, getConnection, loadKeypair, sendWithRetry, pollSignatureStatus, getRecentPriorityFees, checkTransactionSize, eventBus, createLogger, sendWarningAlert, acquireToken, getFallbackConnection, backoffMs } from "@percolator/shared";
+import { config, getConnection, loadKeypair, sendWithRetry, sendWithRetryKeeper, pollSignatureStatus, getRecentPriorityFees, checkTransactionSize, eventBus, createLogger, sendWarningAlert, acquireToken, getFallbackConnection, backoffMs, getErrorMessage } from "@percolator/shared";
 import { OracleService } from "./oracle.js";
 
 const logger = createLogger("keeper:liquidation");
@@ -40,7 +40,7 @@ async function fetchSlabWithRetry(
       return await fetchSlab(conn, slabPubkey);
     } catch (err) {
       lastErr = err;
-      const msg = err instanceof Error ? err.message.toLowerCase() : String(err).toLowerCase();
+      const msg = getErrorMessage(err).toLowerCase();
       const isRetryable = msg.includes("429") || msg.includes("too many requests")
         || msg.includes("rate limit") || msg.includes("timeout")
         || msg.includes("socket") || msg.includes("econnrefused")
@@ -62,6 +62,64 @@ async function fetchSlabWithRetry(
 // BL2: Extract magic numbers to named constants
 const PRICE_E6_DIVISOR = 1_000_000n; // Price precision divisor (6 decimals)
 const BPS_MULTIPLIER = 10_000n; // Basis points multiplier (100% = 10000 bps)
+
+/**
+ * Oracle mode for a market.
+ * - 'pyth-pinned': oracle_authority == [0;32] && index_feed_id != [0;32]
+ *   → staleness enforced on-chain by Pyth CPI
+ * - 'hyperp': index_feed_id == [0;32]
+ *   → DEX oracle, authority_timestamp stores funding rate (not a real timestamp)
+ * - 'admin': oracle_authority != [0;32] && index_feed_id != [0;32]
+ *   → off-chain authority pushes prices; needs staleness check
+ */
+type OracleMode = "pyth-pinned" | "hyperp" | "admin";
+
+/**
+ * Detect oracle mode from market config keys.
+ * Centralizes mode detection so scanMarket and liquidate use identical logic.
+ */
+function detectOracleMode(cfg: { oracleAuthority: PublicKey; indexFeedId: PublicKey }): OracleMode {
+  const zeroKey = new PublicKey(new Uint8Array(32));
+  const isHyperp = cfg.indexFeedId.equals(zeroKey);
+  if (isHyperp) return "hyperp";
+  if (cfg.oracleAuthority.equals(zeroKey)) return "pyth-pinned";
+  return "admin";
+}
+
+/**
+ * Resolve the effective price for a market based on its oracle mode.
+ * Both scanMarket and liquidate call this to ensure identical price selection
+ * logic, including the staleness fallback for admin-oracle markets.
+ *
+ * Returns 0n if no valid price is available.
+ */
+function resolveMarketPrice(
+  cfg: {
+    oracleAuthority: PublicKey;
+    indexFeedId: PublicKey;
+    lastEffectivePriceE6: bigint;
+    authorityPriceE6: bigint;
+    authorityTimestamp: bigint;
+  },
+  mode: OracleMode,
+): { price: bigint; stale: boolean } {
+  if (mode === "pyth-pinned") {
+    return { price: cfg.lastEffectivePriceE6, stale: false };
+  }
+  if (mode === "hyperp") {
+    return { price: cfg.lastEffectivePriceE6, stale: false };
+  }
+  // Admin oracle: try authorityPriceE6 with off-chain staleness check
+  const now = BigInt(Math.floor(Date.now() / 1000));
+  const priceAge = cfg.authorityTimestamp > 0n ? now - cfg.authorityTimestamp : now;
+  const authorityFresh = cfg.authorityPriceE6 > 0n && priceAge <= 60n;
+
+  if (authorityFresh) {
+    return { price: cfg.authorityPriceE6, stale: false };
+  }
+  // Authority stale — fall back to lastEffectivePriceE6 (mirrors on-chain behavior)
+  return { price: cfg.lastEffectivePriceE6, stale: true };
+}
 
 interface LiquidationCandidate {
   slabAddress: string;
@@ -89,22 +147,14 @@ export class LiquidationService {
   // PERC-134: Exponential backoff on consecutive scan failures
   private consecutiveFailures = 0;
   private readonly maxBackoffMs = 300_000; // 5 minutes max backoff
+  // PERC-484: Track markets that permanently fail with InvalidSlabLen (0x4).
+  // These are test/corrupt markets with wrong slab size — skip them indefinitely.
+  private readonly permanentlySkipped = new Set<string>();
 
   constructor(oracleService: OracleService, intervalMs = 60_000) {
     this.oracleService = oracleService;
     this.intervalMs = intervalMs;
   }
-
-  // Markets to skip during liquidation scanning (comma-separated slab addresses in env)
-  private static readonly BLOCKED_MARKET_ADDRESSES: ReadonlySet<string> = new Set(
-    (process.env.BLOCKED_MARKET_ADDRESSES ?? "")
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean),
-  );
-
-  // Sentinel lastCrankSlot value used in corrupt/uninitialized test markets
-  private static readonly SENTINEL_CRANK_SLOT = 100_000_000n;
 
   /**
    * Scan a single market for undercollateralized accounts.
@@ -112,67 +162,27 @@ export class LiquidationService {
   async scanMarket(market: DiscoveredMarket): Promise<LiquidationCandidate[]> {
     const slabAddress = market.slabAddress.toBase58();
 
-    // Skip explicitly blocklisted markets (e.g., wrong oracle_authority — issue #837)
-    if (LiquidationService.BLOCKED_MARKET_ADDRESSES.has(slabAddress)) {
-      logger.debug("Skipping blocklisted market", { slabAddress });
-      return [];
-    }
-
     try {
       const data = await fetchSlabWithRetry(market.slabAddress);
       const engine = parseEngine(data);
       const params = parseParams(data);
       const cfg = parseConfig(data);
-
-      // Guard: skip markets that were never properly InitMarket'd.
-      // maintenanceMarginBps === 0n is the canonical signal — a valid market always
-      // has a non-zero maintenance margin set during initialization.
-      // These corrupt/test markets (e.g. lastCrankSlot=100_000_000 sentinel) trigger
-      // custom program error 0x4 (InvalidArgument) on every crank attempt. (issue #838)
-      if (params.maintenanceMarginBps === 0n) {
-        logger.debug("Skipping uninitialised market (maintenanceMarginBps=0)", { slabAddress });
-        return [];
-      }
-
-      // Additional sentinel check: lastCrankSlot of exactly 100_000_000 is test data,
-      // not a real devnet slot, and indicates the market state was never cranked normally.
-      if (engine.lastCrankSlot === LiquidationService.SENTINEL_CRANK_SLOT) {
-        logger.warn("Skipping market with sentinel lastCrankSlot (corrupt state)", {
-          slabAddress,
-          lastCrankSlot: engine.lastCrankSlot.toString(),
-        });
-        return [];
-      }
       const layout = detectLayout(data.length);
       if (!layout) return [];
 
       const candidates: LiquidationCandidate[] = [];
       const maintenanceMarginBps = params.maintenanceMarginBps;
 
-      // Determine market oracle mode:
-      // 1. Pyth-pinned: oracle_authority == [0;32] && index_feed_id != [0;32]
-      //    → use lastEffectivePriceE6 (staleness enforced on-chain by Pyth CPI)
-      // 2. Hyperp (DEX oracle): index_feed_id == [0;32]
-      //    → authority_price_e6 = mark, last_effective_price_e6 = index
-      //    → authority_timestamp stores funding rate, NOT a real timestamp
-      //    → use lastEffectivePriceE6 (index price, updated by on-chain crank)
-      // 3. Admin oracle: oracle_authority != [0;32] && index_feed_id != [0;32]
-      //    → use authorityPriceE6 with off-chain staleness check
-      const zeroKey = new PublicKey(new Uint8Array(32));
-      const isPythPinned = cfg.oracleAuthority.equals(zeroKey) && !cfg.indexFeedId.equals(zeroKey);
-      const isHyperp = cfg.indexFeedId.equals(zeroKey);
+      // Determine oracle mode and resolve price via shared helpers
+      const oracleMode = detectOracleMode(cfg);
+      const { price: resolvedPrice, stale } = resolveMarketPrice(cfg, oracleMode);
 
       let price: bigint;
-      if (isPythPinned) {
-        // Pyth-pinned: use lastEffectivePriceE6 (staleness enforced on-chain by Pyth CPI)
-        price = cfg.lastEffectivePriceE6;
+      if (oracleMode === "pyth-pinned") {
+        price = resolvedPrice;
         if (price === 0n) return []; // No price resolved yet
-      } else if (isHyperp) {
-        // Hyperp mode: use index price (lastEffectivePriceE6), which is the on-chain
-        // crank's output from get_engine_oracle_price_e6. This is the price used for
-        // PnL settlement. DO NOT check authorityTimestamp — it stores funding rate,
-        // not a real timestamp.
-        price = cfg.lastEffectivePriceE6;
+      } else if (oracleMode === "hyperp") {
+        price = resolvedPrice;
         if (price === 0n) return []; // Market not bootstrapped yet
 
         // Sanity check: mark price should also be non-zero in a healthy Hyperp market
@@ -183,34 +193,20 @@ export class LiquidationService {
           return [];
         }
       } else {
-        // Authority-pushed: try authorityPriceE6 with off-chain staleness check
-        const now = BigInt(Math.floor(Date.now() / 1000));
-        const priceAge = cfg.authorityTimestamp > 0n ? now - cfg.authorityTimestamp : now;
-        const authorityFresh = cfg.authorityPriceE6 > 0n && priceAge <= 60n;
-
-        if (authorityFresh) {
-          price = cfg.authorityPriceE6;
-        } else {
-          // Authority stale or absent — fall back to lastEffectivePriceE6.
-          // This mirrors the on-chain behavior: read_price_with_authority falls back
-          // to Pyth/Chainlink/DEX when authority is stale. lastEffectivePriceE6 is the
-          // clamped result from the last on-chain oracle resolution (any source).
-          price = cfg.lastEffectivePriceE6;
-          if (price === 0n) {
-            // No effective price at all — market not yet bootstrapped
-            if (engine.totalOpenInterest > 0n) {
-              logger.warn("No valid price (authority stale, no effective price), skipping", {
-                slabAddress,
-                authorityTimestamp: Number(cfg.authorityTimestamp),
-                priceAgeSeconds: Number(priceAge),
-              });
-            }
-            return [];
+        // Admin oracle — resolveMarketPrice handles staleness fallback
+        price = resolvedPrice;
+        if (price === 0n) {
+          if (engine.totalOpenInterest > 0n) {
+            logger.warn("No valid price (authority stale, no effective price), skipping", {
+              slabAddress,
+              authorityTimestamp: Number(cfg.authorityTimestamp),
+            });
           }
-          // Log the fallback at debug level (this is expected for most markets)
+          return [];
+        }
+        if (stale) {
           logger.debug("Authority price stale, using lastEffectivePriceE6", {
             slabAddress,
-            priceAgeSeconds: Number(priceAge),
             lastEffectivePriceE6: price.toString(),
           });
         }
@@ -241,23 +237,20 @@ export class LiquidationService {
               ? price - entryPrice    // long: profit when price goes up
               : entryPrice - price;   // short: profit when price goes down
             
-            // BH5: BigInt math has arbitrary precision — no overflow possible.
-            // Guard only against sentinel/corrupted values (u64::MAX from
-            // uninitialized on-chain fields) which would produce nonsense PnL.
-            const U64_MAX = 18446744073709551615n;
+            // BH5: Overflow protection - check bounds before multiplication
+            const MAX_SAFE_BIGINT = 9007199254740991n; // Number.MAX_SAFE_INTEGER
             const absPosSize = absBI(account.positionSize);
             
-            if (absPosSize >= U64_MAX || absBI(entryPrice) >= U64_MAX) {
-              // Corrupted/sentinel on-chain data — skip this account
-              logger.warn("PnL skipped: sentinel position or entry price", {
-                accountIndex: i, slabAddress,
-                positionSize: account.positionSize.toString(),
-                entryPrice: entryPrice.toString(),
-              });
-              continue;
+            // Check if multiplication would overflow
+            if (diff > 0n && absPosSize > MAX_SAFE_BIGINT / diff) {
+              logger.warn("PnL calculation overflow", { accountIndex: i, slabAddress });
+              markPnl = diff > 0n ? MAX_SAFE_BIGINT : -MAX_SAFE_BIGINT;
+            } else if (diff < 0n && absPosSize > MAX_SAFE_BIGINT / -diff) {
+              logger.warn("PnL calculation overflow", { accountIndex: i, slabAddress });
+              markPnl = -MAX_SAFE_BIGINT;
+            } else {
+              markPnl = (diff * absPosSize) / price;
             }
-
-            markPnl = (diff * absPosSize) / price;
           }
           const equity = account.capital + markPnl;
 
@@ -301,7 +294,7 @@ export class LiquidationService {
     } catch (err) {
       logger.error("Market scan failed", {
         slabAddress,
-        error: err instanceof Error ? err.message : String(err),
+        error: getErrorMessage(err),
         stack: err instanceof Error ? err.stack : undefined,
       });
       return [];
@@ -321,7 +314,7 @@ export class LiquidationService {
 
     try {
       const connection = getConnection();
-      const keypair = loadKeypair(config.crankKeypair);
+      const keypair = loadKeypair(process.env.CRANK_KEYPAIR!);
       const programId = market.programId;
 
       // Build multi-instruction tx: push price → crank → liquidate
@@ -387,13 +380,10 @@ export class LiquidationService {
           return null;
         }
 
-        // Use the same price source as scanMarket based on market mode
-        const freshZeroKey = new PublicKey(new Uint8Array(32));
-        const freshIsHyperp = freshCfg.indexFeedId.equals(freshZeroKey);
-        const freshIsPythPinned = freshCfg.oracleAuthority.equals(freshZeroKey) && !freshIsHyperp;
-        const freshPrice = (freshIsPythPinned || freshIsHyperp)
-          ? freshCfg.lastEffectivePriceE6
-          : freshCfg.authorityPriceE6;
+        // Use the same price source as scanMarket via shared helpers
+        // (fixes bug where admin-oracle staleness fallback was missing here)
+        const freshMode = detectOracleMode(freshCfg);
+        const { price: freshPrice } = resolveMarketPrice(freshCfg, freshMode);
         if (freshPrice > 0n) {
           const notional = absBI(freshAccount.positionSize) * freshPrice / PRICE_E6_DIVISOR;
           if (notional > 0n) {
@@ -418,58 +408,16 @@ export class LiquidationService {
         }
       }
 
-      // Send all in one tx with retry (Bug 7+8+9)
-      const { Transaction } = await import("@solana/web3.js");
-      const MAX_RETRIES = 2;
-      let sig: string | null = null;
-      
-      // BH6 + BH11: Get dynamic priority fees and compute budget
-      const { priorityFeeMicroLamports, computeUnitLimit } = await getRecentPriorityFees(connection);
-      
-      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-        try {
-          const tx = new Transaction();
-          
-          // BH6 + BH11: Add compute budget instructions at the start
-          tx.add(
-            ComputeBudgetProgram.setComputeUnitLimit({ units: computeUnitLimit }),
-            ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFeeMicroLamports })
-          );
-          
-          for (const ix of instructions) {
-            tx.add(ix);
-          }
-          const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
-          tx.recentBlockhash = blockhash;
-          tx.feePayer = keypair.publicKey;
-          tx.sign(keypair);
-          
-          // BH9: Check transaction size before sending
-          checkTransactionSize(tx);
-          
-          const txSig = await connection.sendRawTransaction(tx.serialize(), {
-            skipPreflight: false,
-            preflightCommitment: "confirmed",
-          });
-          // Use getSignatureStatuses polling instead of confirmTransaction
-          // (confirmTransaction can falsely report "block height exceeded" on devnet)
-          await pollSignatureStatus(connection, txSig);
-          sig = txSig;
-          break;
-        } catch (retryErr) {
-          const errMsg = retryErr instanceof Error ? retryErr.message.toLowerCase() : String(retryErr).toLowerCase();
-          const isNetworkError = errMsg.includes("timeout") || errMsg.includes("socket") || errMsg.includes("econnrefused") || errMsg.includes("429") || errMsg.includes("block height exceeded");
-          if (!isNetworkError || attempt >= MAX_RETRIES) {
-            throw retryErr;
-          }
-          console.warn(`[LiquidationService] Attempt ${attempt + 1} failed with network error, retrying...`);
-          await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
-        }
-      }
+      // PERC-204: Use keeper-optimized send (skipPreflight + multi-RPC + tight CU)
+      // Replaces manual tx building with sendWithRetryKeeper for:
+      //   - skipPreflight=true (saves ~20-50ms)
+      //   - Multi-RPC parallel broadcast (+20-40% landing rate)
+      //   - Simulation-based tight CU limit (better queue position)
+      const sig = await sendWithRetryKeeper(connection, instructions, [keypair], 3);
 
       // BC1: Track signature to prevent replay attacks
       const now = Date.now();
-      this.recentSignatures.set(sig!, now);
+      this.recentSignatures.set(sig, now);
       // Clean up signatures older than TTL
       for (const [oldSig, timestamp] of this.recentSignatures.entries()) {
         if (now - timestamp > this.signatureTTLMs) {
@@ -480,7 +428,7 @@ export class LiquidationService {
       this.liquidationCount++;
       eventBus.publish("liquidation.success", slabAddress.toBase58(), {
         accountIdx,
-        signature: sig!,
+        signature: sig,
       });
       logger.info("Account liquidated", { accountIndex: accountIdx, slabAddress: slabAddress.toBase58(), signature: sig });
       
@@ -488,13 +436,32 @@ export class LiquidationService {
       await sendWarningAlert("Liquidation executed", [
         { name: "Market", value: slabAddress.toBase58().slice(0, 8), inline: true },
         { name: "Account Index", value: accountIdx.toString(), inline: true },
-        { name: "Signature", value: sig!.slice(0, 12), inline: true },
+        { name: "Signature", value: sig.slice(0, 12), inline: true },
       ]);
       
-      return sig!;
+      return sig;
     } catch (err) {
+      const errMsg = getErrorMessage(err);
+
+      // PERC-484: InvalidSlabLen (0x4) means the slab has wrong size for the program.
+      // These are test/corrupt markets that will never succeed — permanently skip them
+      // so the liquidation service stops retrying every 60 seconds.
+      if (errMsg.includes("custom program error: 0x4")) {
+        this.permanentlySkipped.add(slabAddress.toBase58());
+        logger.warn(
+          "Market slab size mismatch (0x4 InvalidSlabLen) — permanently skipping for liquidation. " +
+          "Fix: run `npx tsx scripts/reinit-slab.ts --slab <ADDRESS>` to recreate with correct size.",
+          {
+            slabAddress: slabAddress.toBase58(),
+            accountIdx,
+            programId: market.programId.toBase58(),
+          },
+        );
+        return null;
+      }
+
       logger.error("Liquidation failed", {
-        error: err instanceof Error ? err.message : String(err),
+        error: errMsg,
         stack: err instanceof Error ? err.stack : undefined,
         slabAddress: slabAddress.toBase58(),
         accountIdx,
@@ -504,7 +471,7 @@ export class LiquidationService {
       
       eventBus.publish("liquidation.failure", slabAddress.toBase58(), {
         accountIdx,
-        error: err instanceof Error ? err.message : String(err),
+        error: errMsg,
       });
       return null;
     }
@@ -530,8 +497,17 @@ export class LiquidationService {
 
     for (let i = 0; i < entries.length; i += BATCH_SIZE) {
       const batch = entries.slice(i, i + BATCH_SIZE);
+      // PERC-484: Skip markets permanently flagged as invalid slab (0x4 InvalidSlabLen).
+      const filteredBatch = batch.filter((state) => {
+        const addr = state.market.slabAddress.toBase58();
+        if (this.permanentlySkipped.has(addr)) {
+          logger.debug("Skipping permanently-skipped market", { slabAddress: addr });
+          return false;
+        }
+        return true;
+      });
       const batchResults = await Promise.allSettled(
-        batch.map((state) => this.scanMarket(state.market)),
+        filteredBatch.map((state) => this.scanMarket(state.market)),
       );
 
       for (let j = 0; j < batchResults.length; j++) {
@@ -546,7 +522,7 @@ export class LiquidationService {
 
         // Liquidations are sequential (each is a transaction)
         for (const candidate of candidates) {
-          const sig = await this.liquidate(batch[j]!.market, candidate.accountIdx);
+          const sig = await this.liquidate(filteredBatch[j]!.market, candidate.accountIdx);
           if (sig) liquidated++;
         }
       }
@@ -617,6 +593,8 @@ export class LiquidationService {
       scanCount: this.scanCount,
       lastScanTime: this.lastScanTime,
       running: this.timer !== null,
+      permanentlySkippedCount: this.permanentlySkipped.size,
+      permanentlySkippedMarkets: Array.from(this.permanentlySkipped),
     };
   }
 }
