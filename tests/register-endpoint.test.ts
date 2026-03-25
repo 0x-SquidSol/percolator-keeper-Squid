@@ -2,6 +2,7 @@
  * Tests for POST /register endpoint security hardening:
  * - timingSafeEqual auth (no timing oracle)
  * - Body size limit (DoS guard)
+ * - req.resume() on early-exit paths (GH#19 — memory-exhaustion DoS guard)
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import http from "node:http";
@@ -109,10 +110,16 @@ function buildRegisterServer(
 
   return http.createServer((req, res) => {
     if (req.url === "/register" && req.method === "POST") {
+      // GH#19: drain socket before early-exit responses to prevent memory exhaustion
+      const rejectEarly = (status: number, message: string) => {
+        req.resume();
+        res.writeHead(status, { "Content-Type": "application/json", "Connection": "close" });
+        res.end(JSON.stringify({ success: false, message }));
+      };
+
       const registerSecret = secret;
       if (!registerSecret) {
-        res.writeHead(503, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ success: false, message: "Endpoint not configured" }));
+        rejectEarly(503, "Endpoint not configured");
         return;
       }
       const provided = String(req.headers["x-shared-secret"] ?? "");
@@ -122,8 +129,7 @@ function buildRegisterServer(
         secretBuf.length === providedBuf.length &&
         timingSafeEqual(secretBuf, providedBuf);
       if (!authed) {
-        res.writeHead(401, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ success: false, message: "Unauthorized" }));
+        rejectEarly(401, "Unauthorized");
         return;
       }
       let body = "";
@@ -304,6 +310,65 @@ describe("/register endpoint", () => {
         body: JSON.stringify({ slabAddress: "slab1" }),
       });
       expect(res.status).toBe(422);
+    });
+  });
+
+  describe("GH#19 — req.resume() on early-exit paths (memory DoS guard)", () => {
+    it("401 path drains large body and responds without hanging", async () => {
+      // Sends a 10 KB body with wrong auth — server must respond promptly (not buffer until timeout)
+      const bigBody = "X".repeat(10 * 1024);
+      const start = Date.now();
+      const res = await doRequest(port, {
+        headers: {
+          "x-shared-secret": "wrong-secret",
+          "Content-Type": "application/json",
+        },
+        body: bigBody,
+      });
+      const elapsed = Date.now() - start;
+      expect(res.status).toBe(401);
+      // With req.resume(), the response should arrive in under 2 seconds regardless of body size.
+      // Without it, the connection would hang until the socket times out (typically 30-120s).
+      expect(elapsed).toBeLessThan(2000);
+    });
+
+    it("503 path (no secret configured) drains large body and responds without hanging", async () => {
+      // Build a server with no secret configured
+      const noSecretServer = http.createServer((req, res) => {
+        if (req.url === "/register" && req.method === "POST") {
+          const rejectEarly = (status: number, message: string) => {
+            req.resume();
+            res.writeHead(status, { "Content-Type": "application/json", "Connection": "close" });
+            res.end(JSON.stringify({ success: false, message }));
+          };
+          const registerSecret = ""; // empty — simulates unconfigured
+          if (!registerSecret) {
+            rejectEarly(503, "Endpoint not configured");
+            return;
+          }
+        }
+        res.writeHead(404);
+        res.end();
+      });
+
+      const noSecretPort = await new Promise<number>((resolve) => {
+        noSecretServer.listen(0, "127.0.0.1", () => {
+          resolve((noSecretServer.address() as import("node:net").AddressInfo).port);
+        });
+      });
+
+      const bigBody = "X".repeat(10 * 1024);
+      const start = Date.now();
+      const res = await doRequest(noSecretPort, {
+        headers: { "Content-Type": "application/json" },
+        body: bigBody,
+      });
+      const elapsed = Date.now() - start;
+
+      await new Promise<void>((resolve) => noSecretServer.close(() => resolve()));
+
+      expect(res.status).toBe(503);
+      expect(elapsed).toBeLessThan(2000);
     });
   });
 });
