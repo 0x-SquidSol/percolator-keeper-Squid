@@ -1,5 +1,6 @@
 import "dotenv/config";
 import http from "node:http";
+import { timingSafeEqual } from "node:crypto";
 import { config, createLogger, initSentry, captureException, sendInfoAlert, createServiceMonitors } from "@percolator/shared";
 import { OracleService } from "./services/oracle.js";
 import { CrankService } from "./services/crank.js";
@@ -57,15 +58,34 @@ const healthServer = http.createServer((req, res) => {
       res.end(JSON.stringify({ success: false, message: "Endpoint not configured" }));
       return;
     }
-    const provided = req.headers["x-shared-secret"] ?? "";
-    if (provided !== registerSecret) {
+    const provided = String(req.headers["x-shared-secret"] ?? "");
+    // Timing-safe comparison to prevent timing oracle attacks on the shared secret
+    const secretBuf = Buffer.from(registerSecret, "utf8");
+    const providedBuf = Buffer.from(provided, "utf8");
+    const authed =
+      secretBuf.length === providedBuf.length &&
+      timingSafeEqual(secretBuf, providedBuf);
+    if (!authed) {
       res.writeHead(401, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ success: false, message: "Unauthorized" }));
       return;
     }
+    // Body size limit: 4 KB max to prevent memory exhaustion
+    const MAX_BODY_SIZE = 4 * 1024;
     let body = "";
-    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    let bodySize = 0;
+    req.on("data", (chunk: Buffer) => {
+      bodySize += chunk.length;
+      if (bodySize > MAX_BODY_SIZE) {
+        res.writeHead(413, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ success: false, message: "Request body too large" }));
+        req.destroy();
+        return;
+      }
+      body += chunk.toString();
+    });
     req.on("end", async () => {
+      if (bodySize > MAX_BODY_SIZE) return; // already responded above
       try {
         const { slabAddress, mainnetCA } = JSON.parse(body) as { slabAddress?: string; mainnetCA?: string };
         if (!slabAddress) {
