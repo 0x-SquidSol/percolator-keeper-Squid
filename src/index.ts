@@ -4,7 +4,7 @@ import { config, createLogger, initSentry, captureException, sendInfoAlert, crea
 import { OracleService } from "./services/oracle.js";
 import { CrankService } from "./services/crank.js";
 import { LiquidationService } from "./services/liquidation.js";
-import { DevnetPriceResolver } from "./services/devnet-price-resolver.js";
+import { validateKeeperEnvGuards } from "./env-guards.js";
 
 // Monitoring — alerts to Discord on threshold breaches
 export const monitors = createServiceMonitors("Keeper");
@@ -14,15 +14,15 @@ initSentry("keeper");
 
 const logger = createLogger("keeper");
 
-if (!config.crankKeypair) {
+if (!process.env.CRANK_KEYPAIR) {
   throw new Error("CRANK_KEYPAIR must be set for keeper service");
 }
 
+validateKeeperEnvGuards();
+
 logger.info("Keeper service starting");
 
-const devnetResolver = new DevnetPriceResolver();
 const oracleService = new OracleService();
-oracleService.setDevnetResolver(devnetResolver);
 const crankService = new CrankService(oracleService);
 const liquidationService = new LiquidationService(oracleService);
 
@@ -47,6 +47,44 @@ crankService.getMarkets().forEach((_, slabAddress) => {
 const startupTime = Date.now();
 const healthPort = Number(process.env.KEEPER_HEALTH_PORT ?? 8081);
 const healthServer = http.createServer((req, res) => {
+  // POST /register — hot-register a new market without waiting for discovery cycle
+  // Body: { slabAddress: string, mainnetCA?: string }
+  // Auth: requires x-shared-secret header matching KEEPER_REGISTER_SECRET env var (defense-in-depth; #780)
+  if (req.url === "/register" && req.method === "POST") {
+    const registerSecret = process.env.KEEPER_REGISTER_SECRET ?? "";
+    if (!registerSecret) {
+      res.writeHead(503, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ success: false, message: "Endpoint not configured" }));
+      return;
+    }
+    const provided = req.headers["x-shared-secret"] ?? "";
+    if (provided !== registerSecret) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ success: false, message: "Unauthorized" }));
+      return;
+    }
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const { slabAddress, mainnetCA } = JSON.parse(body) as { slabAddress?: string; mainnetCA?: string };
+        if (!slabAddress) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ success: false, message: "slabAddress is required" }));
+          return;
+        }
+        const result = await crankService.registerMarket(slabAddress, mainnetCA);
+        res.writeHead(result.success ? 200 : 422, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result));
+      } catch (err) {
+        logger.error("Register endpoint error", { error: err instanceof Error ? err.message : String(err) });
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ success: false, message: "Internal error" }));
+      }
+    });
+    return;
+  }
+
   if (req.url === "/health" && req.method === "GET") {
     const markets = crankService.getMarkets();
     const marketsTracked = markets.size;
@@ -114,10 +152,6 @@ healthServer.listen(healthPort, () => {
 });
 
 async function start() {
-  // Start devnet resolver first so oracle fallbacks are warm before first crank
-  await devnetResolver.start();
-  logger.info("DevnetPriceResolver started");
-
   const markets = await crankService.discover();
   logger.info("Markets discovered", { count: markets.length });
   crankService.start();
@@ -162,10 +196,6 @@ async function shutdown(signal: string): Promise<void> {
     // Stop liquidation service (clears timers)
     logger.info("Stopping liquidation service");
     liquidationService.stop();
-
-    // Stop devnet resolver refresh timer
-    logger.info("Stopping devnet price resolver");
-    devnetResolver.stop();
     
     // Note: Solana connection doesn't need explicit cleanup
     // Oracle service has no persistent state to clean up
