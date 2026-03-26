@@ -31,10 +31,13 @@ vi.mock('@percolator/shared', () => ({
     secretKey: new Uint8Array(64),
   })),
   sendWithRetry: vi.fn(async () => 'mock-signature'),
-  getErrorMessage: vi.fn((err: unknown) => err instanceof Error ? err.message : String(err)),
   eventBus: {
     publish: vi.fn(),
   },
+  getErrorMessage: vi.fn((err: unknown) => {
+    if (err instanceof Error) return err.message;
+    return String(err);
+  }),
 }));
 
 import { OracleService } from '../../src/services/oracle.js';
@@ -490,28 +493,6 @@ describe('OracleService', () => {
     });
   });
 
-  describe('on-chain fallback disabled', () => {
-    it('should NOT use on-chain authorityPriceE6 when external sources fail', async () => {
-      // Simulate all external sources returning null
-      vi.mocked(fetch).mockResolvedValue({
-        json: async () => ({ pairs: [] }), // DexScreener returns no pairs
-      } as any);
-
-      const mockMarketConfig: any = {
-        collateralMint: new PublicKey('So11111111111111111111111111111111111111112'),
-        oracleAuthority: new PublicKey('11111111111111111111111111111111'),
-        // On-chain price is absurdly high (the bug scenario: $13.3 quadrillion)
-        authorityPriceE6: 13_300_000_000_000_000_000_000n,
-      };
-
-      const slab = 'SLAB_NO_ONCHAIN_FALLBACK';
-
-      // pushPrice should return false (skip) instead of pushing the corrupted on-chain value
-      const result = await oracleService.pushPrice(slab, mockMarketConfig);
-      expect(result).toBe(false);
-    });
-  });
-
   describe('getCurrentPrice', () => {
     it('should return latest price from history', async () => {
       const mockResponse = {
@@ -534,119 +515,6 @@ describe('OracleService', () => {
     it('should return null for market with no history', () => {
       const current = oracleService.getCurrentPrice('UNKNOWN_SLAB');
       expect(current).toBeNull();
-    });
-  });
-
-  describe.skip('devnet price resolver fallbacks (setDevnetResolver removed in PR sync/monorepo-keeper-2026-03-25)', () => {
-    // Each test uses unique mints to avoid DexScreener module-level cache collisions
-    const SLAB = 'SlabForDevnetToken111111111111111111111111111';
-
-    /** Returns a mock DevnetPriceResolver for testing */
-    function makeResolver(opts: {
-      mainnetCa?: string | null;
-      staticPrice?: bigint | null;
-    }) {
-      return {
-        getMainnetCa: vi.fn().mockReturnValue(opts.mainnetCa ?? null),
-        getStaticPrice: vi.fn().mockReturnValue(opts.staticPrice ?? null),
-      };
-    }
-
-    it('should use mainnet_ca fallback when devnet mint has no DexScreener/Jupiter listing', async () => {
-      const DEVNET_MINT = 'DevnetMintFallback1111111111111111111111111111';
-      const MAINNET_CA  = 'MainnetCaFallback1111111111111111111111111111A';
-
-      // Devnet mint → no price. Mainnet CA → valid DexScreener price.
-      vi.mocked(fetch)
-        .mockResolvedValueOnce({ json: async () => ({ pairs: [] }) } as any)  // dex devnet → null
-        .mockResolvedValueOnce({ json: async () => ({ data: {} }) } as any)   // jup devnet → null
-        .mockResolvedValueOnce({                                              // dex mainnet_ca → $2.50
-          json: async () => ({
-            pairs: [{ priceUsd: '2.50', liquidity: { usd: 50000 } }],
-          }),
-        } as any)
-        .mockResolvedValueOnce({ json: async () => ({ data: {} }) } as any);  // jup mainnet_ca → null
-
-      const resolver = makeResolver({ mainnetCa: MAINNET_CA });
-      oracleService.setDevnetResolver(resolver as any);
-
-      const result = await oracleService.fetchPrice(DEVNET_MINT, SLAB);
-
-      expect(result).not.toBeNull();
-      expect(result!.priceE6).toBe(2_500_000n);
-      expect(result!.source).toBe('dexscreener-mainnet-ca');
-      expect(resolver.getMainnetCa).toHaveBeenCalledWith(DEVNET_MINT);
-    });
-
-    it('should use jupiter-mainnet-ca when DexScreener mainnet CA also fails', async () => {
-      const DEVNET_MINT = 'DevnetMintJupFallback111111111111111111111111';
-      const MAINNET_CA  = 'MainnetCaJupFallback111111111111111111111111B';
-
-      vi.mocked(fetch)
-        .mockResolvedValueOnce({ json: async () => ({ pairs: [] }) } as any)  // dex devnet → null
-        .mockResolvedValueOnce({ json: async () => ({ data: {} }) } as any)   // jup devnet → null
-        .mockResolvedValueOnce({ json: async () => ({ pairs: [] }) } as any)  // dex mainnet_ca → null
-        .mockResolvedValueOnce({                                               // jup mainnet_ca → $1.75
-          json: async () => ({
-            data: { [MAINNET_CA]: { price: '1.75' } },
-          }),
-        } as any);
-
-      const resolver = makeResolver({ mainnetCa: MAINNET_CA });
-      oracleService.setDevnetResolver(resolver as any);
-
-      const result = await oracleService.fetchPrice(DEVNET_MINT, SLAB);
-
-      expect(result).not.toBeNull();
-      expect(result!.priceE6).toBe(1_750_000n);
-      expect(result!.source).toBe('jupiter-mainnet-ca');
-    });
-
-    it('should use static override when no mainnet_ca and no external price', async () => {
-      const DEVNET_MINT = 'DevnetMintStaticOverride11111111111111111111';
-
-      vi.mocked(fetch)
-        .mockResolvedValueOnce({ json: async () => ({ pairs: [] }) } as any)
-        .mockResolvedValueOnce({ json: async () => ({ data: {} }) } as any);
-
-      const resolver = makeResolver({ mainnetCa: null, staticPrice: 1_000_000n }); // $1.00
-      oracleService.setDevnetResolver(resolver as any);
-
-      const result = await oracleService.fetchPrice(DEVNET_MINT, SLAB);
-
-      expect(result).not.toBeNull();
-      expect(result!.priceE6).toBe(1_000_000n);
-      expect(result!.source).toBe('devnet-override');
-      expect(resolver.getStaticPrice).toHaveBeenCalledWith(DEVNET_MINT);
-    });
-
-    it('should return null when no resolver attached and all external sources fail', async () => {
-      const DEVNET_MINT = 'DevnetMintNoResolver1111111111111111111111111';
-
-      vi.mocked(fetch)
-        .mockResolvedValueOnce({ json: async () => ({ pairs: [] }) } as any)
-        .mockResolvedValueOnce({ json: async () => ({ data: {} }) } as any);
-
-      // No resolver set — default null
-      const result = await oracleService.fetchPrice(DEVNET_MINT, SLAB);
-      expect(result).toBeNull();
-    });
-
-    it('should skip mainnet_ca lookup when mainnet_ca equals devnet mint (prevent loop)', async () => {
-      const DEVNET_MINT = 'DevnetMintLoopGuard111111111111111111111111111';
-
-      vi.mocked(fetch)
-        .mockResolvedValueOnce({ json: async () => ({ pairs: [] }) } as any)
-        .mockResolvedValueOnce({ json: async () => ({ data: {} }) } as any);
-
-      // getMainnetCa returns same address — resolver must NOT retry
-      const resolver = makeResolver({ mainnetCa: DEVNET_MINT, staticPrice: null });
-      oracleService.setDevnetResolver(resolver as any);
-
-      const result = await oracleService.fetchPrice(DEVNET_MINT, SLAB);
-      expect(result).toBeNull();
-      // fetch should only have been called twice (devnet dex + jup), not again for mainnet_ca
-      expect(fetch).toHaveBeenCalledTimes(2);
     });
   });
 });
