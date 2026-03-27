@@ -490,7 +490,20 @@ export class CrankService {
       // Keep the flag in sync so crankMarket() also fast-paths correctly.
       if (!state.foreignOracleSkipped) {
         state.foreignOracleSkipped = true;
-        logger.debug("crankAll: re-skipping foreign oracle market (flag was reset by discover)", { slabAddress });
+        // GH#1748: Use WARN (not debug) on first detection, include both keys so ops can
+        // immediately diagnose a CRANK_KEYPAIR mismatch without reading the source.
+        logger.warn("crankAll: admin-oracle market skipped — keeper is NOT the oracle authority (key mismatch). " +
+          "Fix: set CRANK_KEYPAIR to the oracle authority key, or update the on-chain oracle authority.", {
+          slabAddress,
+          marketOracleAuthority: state.market.config.oracleAuthority.toBase58(),
+          keeperPublicKey: keeperKey.toBase58(),
+        });
+      } else {
+        logger.debug("crankAll: re-skipping foreign oracle market (flag was reset by discover)", {
+          slabAddress,
+          marketOracleAuthority: state.market.config.oracleAuthority.toBase58(),
+          keeperPublicKey: keeperKey.toBase58(),
+        });
       }
       skippedForeignOracle++;
       continue;
