@@ -106,6 +106,7 @@ export class CrankService {
   private readonly signatureTTLMs = 60_000; // 60 seconds
   private _isRunning = false;
   private _cycling = false;
+  private _stalePauseCheck?: (slabAddress: string) => boolean;
 
   constructor(oracleService: OracleService, intervalMs?: number) {
     this.oracleService = oracleService;
@@ -116,6 +117,11 @@ export class CrankService {
 
   get isRunning(): boolean {
     return this._isRunning;
+  }
+
+  /** Register a callback to check if a market is paused due to stale oracle */
+  setStalePauseCheck(check: (slabAddress: string) => boolean): void {
+    this._stalePauseCheck = check;
   }
 
   /**
@@ -454,6 +460,7 @@ export class CrankService {
   let skippedPermanent = 0;
   let skippedForeignOracle = 0;
   let skippedHyperpNoPrice = 0;
+  let skippedStalePaused = 0;
   let skippedFailures = 0;
   let skippedNotDue = 0;
 
@@ -511,6 +518,12 @@ export class CrankService {
       }
     }
 
+    // PERC-8108: Skip markets paused due to stale oracle (>10min without price push)
+    if (this._stalePauseCheck?.(slabAddress)) {
+      skippedStalePaused++;
+      continue;
+    }
+
     if (state.consecutiveFailures > MAX_CONSECUTIVE_FAILURES) {
       skippedFailures++;
       continue;
@@ -523,7 +536,7 @@ export class CrankService {
   }
 
   // NEW: meaningful accounting check
-  const skipped = skippedPermanent + skippedForeignOracle + skippedHyperpNoPrice + skippedFailures + skippedNotDue;
+  const skipped = skippedPermanent + skippedForeignOracle + skippedHyperpNoPrice + skippedStalePaused + skippedFailures + skippedNotDue;
   const total = this.markets.size;
   const accounted = toCrank.length + skipped;
 
@@ -535,6 +548,7 @@ export class CrankService {
       skippedPermanent,
       skippedForeignOracle,
       skippedHyperpNoPrice,
+      skippedStalePaused,
       skippedFailures,
       skippedNotDue,
     });

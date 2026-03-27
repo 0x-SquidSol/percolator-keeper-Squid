@@ -1,10 +1,11 @@
 import "dotenv/config";
 import http from "node:http";
-import { config, createLogger, initSentry, captureException, sendInfoAlert, createServiceMonitors } from "@percolator/shared";
+import { config, createLogger, initSentry, captureException, sendInfoAlert, sendCriticalAlert, createServiceMonitors } from "@percolator/shared";
 import { OracleService } from "./services/oracle.js";
 import { CrankService } from "./services/crank.js";
 import { LiquidationService } from "./services/liquidation.js";
 import { validateKeeperEnvGuards } from "./env-guards.js";
+import { isMainnet } from "./config/network.js";
 
 // Monitoring — alerts to Discord on threshold breaches
 export const monitors = createServiceMonitors("Keeper");
@@ -20,6 +21,13 @@ if (!process.env.CRANK_KEYPAIR) {
 
 validateKeeperEnvGuards();
 
+// If NETWORK=mainnet, the keeper runs against mainnet program (requires FORCE_MAINNET=1).
+// On mainnet, HYPERP markets (SOL-PERP, BTC-PERP, ETH-PERP) use the keeper as oracle authority
+// and price lookups use mainnet mints directly (no mainnetCA override needed).
+if (isMainnet()) {
+  logger.info("Running in MAINNET mode", { programId: config.programId });
+}
+
 logger.info("Keeper service starting");
 
 const oracleService = new OracleService();
@@ -29,6 +37,50 @@ const liquidationService = new LiquidationService(oracleService);
 // Health state tracking
 let lastSuccessfulCrankTime = 0;
 let lastOracleUpdateTime = 0;
+
+// Stale oracle pause guard — markets paused due to stale oracle data
+const stalePausedMarkets = new Set<string>();
+
+const STALE_ALERT_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes → alert
+const STALE_PAUSE_THRESHOLD_MS = 10 * 60 * 1000; // 10 minutes → pause cranking
+
+const staleCheckInterval = setInterval(() => {
+  const alertStale = oracleService.getStaleMarkets(STALE_ALERT_THRESHOLD_MS);
+  const pauseStale = oracleService.getStaleMarkets(STALE_PAUSE_THRESHOLD_MS);
+
+  // Update paused set
+  const newPaused = new Set(pauseStale);
+  // Unpause markets that recovered
+  for (const addr of stalePausedMarkets) {
+    if (!newPaused.has(addr)) {
+      stalePausedMarkets.delete(addr);
+      logger.info("Oracle recovered, unpausing market", { slabAddress: addr });
+    }
+  }
+  // Pause newly stale markets
+  for (const addr of pauseStale) {
+    if (!stalePausedMarkets.has(addr)) {
+      stalePausedMarkets.add(addr);
+      logger.warn("Oracle stale for market, pausing mark updates", { slabAddress: addr, thresholdMs: STALE_PAUSE_THRESHOLD_MS });
+    }
+  }
+
+  // Send alert for 5-min stale markets (includes paused ones)
+  if (alertStale.length > 0) {
+    sendCriticalAlert("Oracle stale for markets", [
+      { name: "Stale Markets", value: alertStale.join(", "), inline: false },
+      { name: "Paused (>10min)", value: stalePausedMarkets.size.toString(), inline: true },
+    ]).catch(() => {});
+  }
+}, 60_000);
+
+/** Check if a market is paused due to stale oracle */
+export function isMarketStalePaused(slabAddress: string): boolean {
+  return stalePausedMarkets.has(slabAddress);
+}
+
+// Wire stale pause check into crank service
+crankService.setStalePauseCheck(isMarketStalePaused);
 
 // Subscribe to crank events to track health
 crankService.getMarkets().forEach((_, slabAddress) => {
@@ -82,6 +134,13 @@ const healthServer = http.createServer((req, res) => {
         res.end(JSON.stringify({ success: false, message: "Internal error" }));
       }
     });
+    return;
+  }
+
+  // GET /pause-status — returns markets paused due to stale oracle
+  if (req.url === "/pause-status" && req.method === "GET") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ pausedMarkets: [...stalePausedMarkets] }));
     return;
   }
 
@@ -180,6 +239,9 @@ async function shutdown(signal: string): Promise<void> {
       { name: "Signal", value: signal, inline: true },
     ]);
     
+    // Stop stale oracle check
+    clearInterval(staleCheckInterval);
+
     // Close health server
     logger.info("Closing health server");
     await new Promise<void>((resolve, reject) => {

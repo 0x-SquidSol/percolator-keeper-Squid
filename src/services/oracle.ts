@@ -350,4 +350,21 @@ export class OracleService {
   getPriceHistory(slabAddress: string): PriceEntry[] {
     return this.priceHistory.get(slabAddress) ?? [];
   }
+
+  /**
+   * Returns slab addresses where the last successful price push
+   * was more than `thresholdMs` ago (or never pushed).
+   * Only considers markets that have at least one price history entry.
+   */
+  getStaleMarkets(thresholdMs: number): string[] {
+    const now = Date.now();
+    const stale: string[] = [];
+    for (const [slabAddress] of this.priceHistory) {
+      const lastPush = this.lastPushTime.get(slabAddress) ?? 0;
+      if (lastPush === 0 || now - lastPush > thresholdMs) {
+        stale.push(slabAddress);
+      }
+    }
+    return stale;
+  }
 }
