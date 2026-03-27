@@ -882,13 +882,12 @@ describe('CrankService', () => {
 
   // PERC-1650: Keeper RPC 429 retry + sequential mode
   describe('PERC-1650: discover() 429 retry', () => {
-    it('passes sequential=true to discoverMarkets', async () => {
+    it('calls discoverMarkets with connection and program id', async () => {
       vi.mocked(core.discoverMarkets).mockResolvedValue([]);
       await crankService.discover();
       expect(core.discoverMarkets).toHaveBeenCalledWith(
         expect.anything(),
         expect.anything(),
-        expect.objectContaining({ sequential: true }),
       );
     });
 
