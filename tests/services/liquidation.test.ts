@@ -586,5 +586,73 @@ describe('LiquidationService', () => {
       expect(shared.sendWithRetryKeeper).not.toHaveBeenCalled();
       expect(result.scanned).toBe(0);
     });
+
+    it('should permanently skip a market after "Unrecognized slab data length" in scanMarket()', async () => {
+      const largeSlabAddr = 'LargeSlab1111111111111111111111111111111111';
+      const svc = new LiquidationService(mockOracleService as any);
+
+      const mockMarket = {
+        slabAddress: { toBase58: () => largeSlabAddr },
+        programId: { toBase58: () => 'Program11111111111111111111111111111111' },
+        config: {
+          collateralMint: { toBase58: () => 'So11111111111111111111111111111111111111112' },
+          oracleAuthority: mockZeroKey(),
+          indexFeedId: mockNonZeroKey(),
+        },
+        params: { maintenanceMarginBps: 500n },
+        header: { admin: { toBase58: () => 'Admin111111111111111111111111111111111' } },
+      };
+
+      // Simulate parseEngine throwing for unknown slab size (992560 bytes = 4096 slots)
+      vi.mocked(core.fetchSlab).mockResolvedValue(new Uint8Array(992560));
+      vi.mocked(core.parseEngine).mockImplementation(() => {
+        throw new Error('Unrecognized slab data length: 992560. Cannot determine layout version.');
+      });
+
+      const candidates = await svc.scanMarket(mockMarket as any);
+      expect(candidates).toEqual([]);
+
+      // Should now be permanently skipped
+      const status = svc.getStatus();
+      expect(status.permanentlySkippedCount).toBe(1);
+      expect(status.permanentlySkippedMarkets).toContain(largeSlabAddr);
+    });
+
+    it('should not call scanMarket for markets skipped due to unrecognized slab length', async () => {
+      const largeSlabAddr = 'LargeSlab2222222222222222222222222222222222';
+      const svc = new LiquidationService(mockOracleService as any);
+
+      const mockMarket = {
+        slabAddress: { toBase58: () => largeSlabAddr },
+        programId: { toBase58: () => 'Program11111111111111111111111111111111' },
+        config: {
+          collateralMint: { toBase58: () => 'So11111111111111111111111111111111111111112' },
+          oracleAuthority: mockZeroKey(),
+          indexFeedId: mockNonZeroKey(),
+        },
+        params: { maintenanceMarginBps: 500n },
+        header: { admin: { toBase58: () => 'Admin111111111111111111111111111111111' } },
+      };
+
+      // First call: throw unrecognized slab length
+      vi.mocked(core.fetchSlab).mockResolvedValue(new Uint8Array(992560));
+      vi.mocked(core.parseEngine).mockImplementationOnce(() => {
+        throw new Error('Unrecognized slab data length: 992560.');
+      });
+
+      const markets = new Map([
+        [largeSlabAddr, { market: mockMarket as any }],
+      ]);
+
+      // First scan: should add to permanentlySkipped
+      await svc.scanAndLiquidateAll(markets);
+      expect(svc.getStatus().permanentlySkippedCount).toBe(1);
+
+      vi.clearAllMocks();
+
+      // Second scan: market is filtered before scanMarket is even called
+      await svc.scanAndLiquidateAll(markets);
+      expect(core.fetchSlab).not.toHaveBeenCalled();
+    });
   });
 });
