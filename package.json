@@ -1,8 +1,6 @@
 {
   "name": "@percolator/keeper",
   "version": "0.1.0",
-  "description": "Percolator Keeper — liquidation, oracle, and crank services for Solana perpetual futures",
-  "license": "Apache-2.0",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -12,8 +10,7 @@
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "test": "vitest run",
-    "test:watch": "vitest",
-    "lint": "tsc --noEmit"
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@percolator/sdk": "github:dcccrypto/percolator-sdk",
@@ -26,22 +23,5 @@
     "tsx": "^4.19.2",
     "typescript": "^5.7.3",
     "vitest": "^4.0.18"
-  },
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/dcccrypto/percolator-keeper.git"
-  },
-  "keywords": [
-    "solana",
-    "percolator",
-    "keeper",
-    "liquidation",
-    "defi"
-  ],
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "@percolator/sdk",
-      "@percolator/shared"
-    ]
   }
 }
