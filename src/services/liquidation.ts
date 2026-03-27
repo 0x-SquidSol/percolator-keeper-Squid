@@ -292,9 +292,28 @@ export class LiquidationService {
 
       return candidates;
     } catch (err) {
+      const errMsg = getErrorMessage(err);
+
+      // Unrecognized slab data length means parseEngine/detectLayout cannot handle
+      // this slab size (e.g. 4096-slot = 992560 bytes, larger than any known layout).
+      // Permanently skip so we stop logging an [ERRO] every ~60 seconds.
+      // Root fix: SDK needs to add a 4096-slot layout variant — message sdk agent.
+      if (errMsg.toLowerCase().includes("unrecognized slab data length")) {
+        this.permanentlySkipped.add(slabAddress);
+        logger.warn(
+          "Unrecognized slab layout — permanently skipping this market in liquidation scanner. " +
+          "SDK needs to add support for this slab size. File issue against percolator-sdk.",
+          {
+            slabAddress,
+            error: errMsg,
+          },
+        );
+        return [];
+      }
+
       logger.error("Market scan failed", {
         slabAddress,
-        error: getErrorMessage(err),
+        error: errMsg,
         stack: err instanceof Error ? err.stack : undefined,
       });
       return [];
