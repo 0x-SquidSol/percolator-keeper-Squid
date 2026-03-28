@@ -5,7 +5,7 @@
  */
 export const MAINNET_HYPERP_MINTS = {
   SOL: "So11111111111111111111111111111111111111112",
-  BTC: "9n4nbM75f5Ui33ZbPYXn59EwSgE8CGsHtAeTH5YFeJ9E", // WBTC
+  BTC: "3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh", // Wormhole Portal wBTC (8 decimals, verified on-chain — GH#30)
   ETH: "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs", // WETH
 } as const;
 
