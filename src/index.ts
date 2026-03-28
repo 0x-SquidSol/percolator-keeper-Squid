@@ -43,8 +43,13 @@ const stalePausedMarkets = new Set<string>();
 
 const STALE_ALERT_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes → alert
 const STALE_PAUSE_THRESHOLD_MS = 10 * 60 * 1000; // 10 minutes → pause cranking
+const STARTUP_GRACE_MS = 5 * 60 * 1000; // 5 minutes grace on startup — avoids false alerts on every deploy
+const _keeperStartTime = Date.now();
 
 const staleCheckInterval = setInterval(() => {
+  // Skip stale checks during startup grace period (GH#29 — false CRITICAL floods on deploy)
+  if (Date.now() - _keeperStartTime < STARTUP_GRACE_MS) return;
+
   const alertStale = oracleService.getStaleMarkets(STALE_ALERT_THRESHOLD_MS);
   const pauseStale = oracleService.getStaleMarkets(STALE_PAUSE_THRESHOLD_MS);
 
