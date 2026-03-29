@@ -3,6 +3,7 @@ import {
   discoverMarkets,
   encodeKeeperCrank,
   encodePushOraclePrice,
+  encodeUpdateHyperpMark,
   buildAccountMetas,
   buildIx,
   derivePythPushOraclePDA,
@@ -15,7 +16,7 @@ import {
   parseParams,
   type DiscoveredMarket,
 } from "@percolator/sdk";
-import { config, getConnection, getFallbackConnection, loadKeypair, sendWithRetry, sendWithRetryKeeper, rateLimitedCall, eventBus, createLogger, sendCriticalAlert } from "@percolator/shared";
+import { config, getConnection, getFallbackConnection, loadKeypair, sendWithRetry, sendWithRetryKeeper, rateLimitedCall, eventBus, createLogger, sendCriticalAlert, getSupabase } from "@percolator/shared";
 import { OracleService } from "./oracle.js";
 
 const logger = createLogger("keeper:crank");
@@ -55,6 +56,12 @@ interface MarketCrankState {
    * Reset to false once a price push succeeds or on-chain price is non-zero.
    */
   hyperpNoPriceSkipped?: boolean;
+  /**
+   * DEX pool address for HYPERP oracle mode.
+   * Passed as account[1] to UpdateHyperpMark instruction.
+   * Populated from Supabase markets.dex_pool_address or mainnet-markets.ts config.
+   */
+  dexPoolAddress?: string;
 }
 
 /** Process items in batches with delay between batches.
@@ -190,10 +197,33 @@ export class CrankService {
     this.lastDiscoveryTime = Date.now();
     logger.info("Market discovery complete", { totalMarkets: discovered.length });
 
+    // Fetch dex_pool_address + mainnet_ca from Supabase for HYPERP pool lookups
+    const slabAddresses = discovered.map((m) => m.slabAddress.toBase58());
+    let dbMarkets: Map<string, { dexPoolAddress?: string; mainnetCA?: string }> = new Map();
+    try {
+      const { data } = await getSupabase()
+        .from("markets")
+        .select("slab_address, dex_pool_address, mainnet_ca")
+        .in("slab_address", slabAddresses);
+      if (data) {
+        for (const row of data) {
+          dbMarkets.set(row.slab_address, {
+            dexPoolAddress: row.dex_pool_address ?? undefined,
+            mainnetCA: row.mainnet_ca ?? undefined,
+          });
+        }
+      }
+    } catch (err) {
+      logger.warn("Failed to fetch market metadata from Supabase", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
     const discoveredKeys = new Set<string>();
     for (const market of discovered) {
       const key = market.slabAddress.toBase58();
       discoveredKeys.add(key);
+      const dbMeta = dbMarkets.get(key);
       if (!this.markets.has(key)) {
         this.markets.set(key, {
           market,
@@ -203,10 +233,15 @@ export class CrankService {
           consecutiveFailures: 0,
           isActive: true,
           missingDiscoveryCount: 0,
+          dexPoolAddress: dbMeta?.dexPoolAddress,
+          mainnetCA: dbMeta?.mainnetCA,
         });
       } else {
         const state = this.markets.get(key)!;
         state.market = market;
+        // Update pool address and mainnetCA from Supabase on every discovery
+        if (dbMeta?.dexPoolAddress) state.dexPoolAddress = dbMeta.dexPoolAddress;
+        if (dbMeta?.mainnetCA) state.mainnetCA = dbMeta.mainnetCA;
         state.missingDiscoveryCount = 0;
         // GH#1508: Reset foreignOracleSkipped on re-discovery — oracle authority may have changed.
         // crankMarket() will re-check and re-set it if the keeper is still not the authority.
@@ -265,6 +300,23 @@ export class CrankService {
     return !market.config.oracleAuthority.equals(PublicKey.default);
   }
 
+  /**
+   * True HYPERP mode: oracle_authority == [0;32] AND index_feed_id == [0;32].
+   * These markets use on-chain DEX pool reads — no off-chain price push needed.
+   */
+  private isHyperpOracle(market: DiscoveredMarket): boolean {
+    return market.config.oracleAuthority.equals(PublicKey.default)
+      && market.config.indexFeedId.equals(PublicKey.default);
+  }
+
+  /**
+   * Pyth-pinned mode: oracle_authority == [0;32] AND index_feed_id != [0;32].
+   */
+  private isPythPinned(market: DiscoveredMarket): boolean {
+    return market.config.oracleAuthority.equals(PublicKey.default)
+      && !market.config.indexFeedId.equals(PublicKey.default);
+  }
+
   /** Check if a market is due for cranking based on activity */
   private isDue(state: MarketCrankState): boolean {
     const interval = state.isActive ? this.intervalMs : this.inactiveIntervalMs;
@@ -285,9 +337,73 @@ export class CrankService {
       const keypair = loadKeypair(process.env.CRANK_KEYPAIR!);
       const programId = market.programId;
 
+      // ── HYPERP mode: permissionless on-chain oracle ──────────────────────
+      // True HYPERP markets (oracle_authority=[0;32], index_feed_id=[0;32]) use
+      // UpdateHyperpMark to read DEX pool state directly on-chain. No off-chain
+      // price push needed — the instruction reads Raydium/PumpSwap/Meteora pools.
+      if (this.isHyperpOracle(market)) {
+        const instructions = [];
+
+        // UpdateHyperpMark: accounts = [slab(writable), dex_pool, clock, ...remaining]
+        // The pool address must be stored in state.dexPoolAddress (from Supabase or config)
+        if (!state.dexPoolAddress) {
+          if (!state.hyperpNoPriceSkipped) {
+            state.hyperpNoPriceSkipped = true;
+            logger.warn("HYPERP market has no dex_pool_address configured — skipping UpdateHyperpMark. " +
+              "Set dex_pool_address in Supabase markets table for this slab.", {
+              slabAddress,
+            });
+          }
+          // Still try to crank (for funding/liquidation) even without oracle update
+        } else {
+          try {
+            const hyperpData = encodeUpdateHyperpMark();
+            const poolKey = new PublicKey(state.dexPoolAddress);
+
+            // Build accounts: [slab(writable), pool(readonly), clock(readonly), ...remaining]
+            const hyperpKeys = [
+              { pubkey: market.slabAddress, isSigner: false, isWritable: true },
+              { pubkey: poolKey, isSigner: false, isWritable: false },
+              { pubkey: SYSVAR_CLOCK_PUBKEY, isSigner: false, isWritable: false },
+            ];
+
+            // PumpSwap pools need vault0 + vault1 as remaining accounts
+            // For now, pass no remaining — Raydium CLMM doesn't need them
+            // TODO: detect pool type and add vault accounts for PumpSwap/Meteora
+
+            instructions.push(buildIx({ programId, keys: hyperpKeys, data: hyperpData }));
+            state.hyperpNoPriceSkipped = false;
+          } catch (err) {
+            logger.warn("UpdateHyperpMark failed to build", {
+              slabAddress,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+
+        // Crank instruction (always — handles funding, liquidation, GC)
+        const crankData = encodeKeeperCrank({ callerIdx: 65535, allowPanic: false });
+        const oracleKey = market.slabAddress; // HYPERP: oracle account is the slab itself
+        const crankKeys = buildAccountMetas(ACCOUNTS_KEEPER_CRANK, [
+          keypair.publicKey,
+          market.slabAddress,
+          SYSVAR_CLOCK_PUBKEY,
+          oracleKey,
+        ]);
+        instructions.push(buildIx({ programId, keys: crankKeys, data: crankData }));
+
+        const sig = await sendWithRetryKeeper(connection, instructions, [keypair]);
+        state.lastCrankTime = Date.now();
+        state.successCount++;
+        state.consecutiveFailures = 0;
+        state.isActive = true;
+        if (state.failureCount > 0) state.failureCount = 0;
+        eventBus.publish("crank.success", slabAddress, { signature: sig });
+        return true;
+      }
+
+      // ── Admin-push mode: off-chain price oracle ────────────────────────────
       // GH#1508: Skip admin-oracle markets where we are NOT the oracle authority.
-      // Cranking without a valid oracle price causes OracleInvalid (0xc). The market
-      // owner must push prices themselves; the keeper has no authority here.
       if (this.isAdminOracle(market) && !keypair.publicKey.equals(market.config.oracleAuthority)) {
         if (!state.foreignOracleSkipped) {
           state.foreignOracleSkipped = true;
@@ -305,13 +421,10 @@ export class CrankService {
       // PERC-204: Build all instructions into a single transaction bundle
       const instructions = [];
 
-      // PERC-204: Bundle oracle price push with crank tx (eliminates separate oracle tx round-trip)
-      // Only push if we are the oracle authority for this market
+      // PERC-204: Bundle oracle price push with crank tx
       let pricePushQueued = false;
       if (this.isAdminOracle(market) && keypair.publicKey.equals(market.config.oracleAuthority)) {
         try {
-          // PERC-465: Use mainnetCA if available (devnet mirror mint markets), else collateralMint.
-          // Fresh devnet mints have no DEX liquidity so Jupiter/DexScreener lookups fail for them.
           const mint = state.mainnetCA ?? market.config.collateralMint.toBase58();
           const priceEntry = await this.oracleService.fetchPrice(mint, slabAddress);
           if (priceEntry) {
@@ -326,38 +439,26 @@ export class CrankService {
             pricePushQueued = true;
           }
         } catch (priceErr) {
-          // Non-fatal: price fetch failed, crank will still run with existing on-chain price
           logger.warn("Price push skipped (bundled)", { slabAddress, error: priceErr instanceof Error ? priceErr.message : String(priceErr) });
         }
       }
 
-      // PERC-1254: Hyperp-mode guard — only applies to admin-oracle markets where the keeper
-      // IS the oracle authority (already confirmed above).  indexFeedId = all-zeros means the
-      // program reads authority_price_e6 as the oracle price.  If no price push succeeded this
-      // cycle AND the on-chain authority_price_e6 is still 0 (never been set), the KeeperCrank
-      // instruction will return OracleInvalid (0xc).  Skip the crank to avoid the failure
-      // cascade.  The market will be retried every interval, so it becomes crankable as
-      // soon as fetchPrice returns a valid price and the push succeeds.
-      // Use toBytes() for the zero-check so this works with both real PublicKey objects and mocks.
-      const isHyperpMode = this.isAdminOracle(market) &&
+      // PERC-1254: Hyperp-mode guard for admin-oracle markets with zero indexFeedId
+      const isAdminHyperpMode = this.isAdminOracle(market) &&
         keypair.publicKey.equals(market.config.oracleAuthority) &&
         market.config.indexFeedId.toBytes().every((b: number) => b === 0);
-      if (isHyperpMode && !pricePushQueued && (market.config.authorityPriceE6 ?? BigInt(0)) === BigInt(0)) {
+      if (isAdminHyperpMode && !pricePushQueued && (market.config.authorityPriceE6 ?? BigInt(0)) === BigInt(0)) {
         if (!state.hyperpNoPriceSkipped) {
           state.hyperpNoPriceSkipped = true;
-          logger.warn("PERC-1254: Skipping Hyperp-mode market — no price available and on-chain authority_price_e6=0. " +
-            "Cranking would cause OracleInvalid (0xc). Will retry when fetchPrice succeeds.", {
+          logger.warn("PERC-1254: Skipping admin-hyperp market — no price available and on-chain authority_price_e6=0.", {
             slabAddress,
-            oracleAuthority: market.config.oracleAuthority.toBase58(),
-            lastEffectivePriceE6: market.config.lastEffectivePriceE6.toString(),
           });
         }
         return false;
       }
-      // Clear the flag once we have a price (either freshly pushed or already on-chain)
       if (state.hyperpNoPriceSkipped && (pricePushQueued || (market.config.authorityPriceE6 ?? BigInt(0)) > BigInt(0))) {
         state.hyperpNoPriceSkipped = false;
-        logger.info("PERC-1254: Hyperp market now has a price — resuming cranks", { slabAddress });
+        logger.info("PERC-1254: Admin-hyperp market now has a price — resuming cranks", { slabAddress });
       }
 
       // Crank instruction
