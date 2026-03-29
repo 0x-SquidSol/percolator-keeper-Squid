@@ -52,6 +52,13 @@ vi.mock('@percolator/shared', () => ({
   sendWithRetryKeeper: vi.fn(async () => 'mock-keeper-sig-' + Date.now()),
   rateLimitedCall: vi.fn((fn) => fn()),
   sendCriticalAlert: vi.fn(),
+  getSupabase: vi.fn(() => ({
+    from: vi.fn(() => ({
+      select: vi.fn(() => ({
+        in: vi.fn(() => ({ data: [], error: null })),
+      })),
+    })),
+  })),
   eventBus: {
     publish: vi.fn(),
   },

@@ -216,8 +216,21 @@ healthServer.listen(healthPort, () => {
 });
 
 async function start() {
-  const markets = await crankService.discover();
+  let markets: Awaited<ReturnType<typeof crankService.discover>> = [];
+  try {
+    markets = await crankService.discover();
+  } catch (err) {
+    // Don't crash on discovery failure — keep running and retry on next cycle
+    logger.warn("Initial market discovery failed — will retry on next cycle", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
   logger.info("Markets discovered", { count: markets.length });
+
+  if (markets.length === 0) {
+    logger.info("No markets found — keeper will idle and retry discovery each cycle. This is normal for fresh mainnet deployments.");
+  }
+
   crankService.start();
   logger.info("Crank service started");
   liquidationService.start(() => crankService.getMarkets());
@@ -227,12 +240,13 @@ async function start() {
   await sendInfoAlert("Keeper service started", [
     { name: "Markets Tracked", value: markets.length.toString(), inline: true },
     { name: "Health Endpoint", value: `http://localhost:${healthPort}/health`, inline: true },
-  ]);
+  ]).catch(() => {}); // Don't crash if alert fails
 }
 
 start().catch((err) => {
   logger.error("Failed to start keeper", { error: err instanceof Error ? err.message : String(err), stack: err instanceof Error ? err.stack : undefined });
-  process.exit(1);
+  // Don't exit — keep the process alive for healthcheck + retry
+  logger.info("Keeper will stay alive for healthcheck despite startup error");
 });
 
 async function shutdown(signal: string): Promise<void> {
