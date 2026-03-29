@@ -133,10 +133,13 @@ export class CrankService {
 
   /**
    * PERC-1650: Per-program 429 retry backoff for discoverMarkets calls.
-   * Escalating delays: 2s → 6s → 18s → 54s before giving up.
+   * Escalating delays: 3s → 9s → 27s → 81s before giving up.
    * Applied at the program level (outer loop).
+   * Note: SDK fires all tier queries in parallel (~8 getProgramAccounts each),
+   * so even a single program invocation is a burst. Start at 3s to give Helius
+   * rate limiters time to recover before the next attempt.
    */
-  private static readonly DISCOVER_429_BACKOFF_MS = [2_000, 6_000, 18_000, 54_000];
+  private static readonly DISCOVER_429_BACKOFF_MS = [3_000, 9_000, 27_000, 81_000];
 
   /** Add up to 25% jitter to avoid thundering herd on retry. */
   private static jitter(ms: number): number {
@@ -188,9 +191,11 @@ export class CrankService {
         allFound.push(...found);
       }
 
-      // Inter-program spacing: 2s base, helps avoid consecutive 429s on multi-program configs.
+      // Inter-program spacing: 3s base, helps avoid consecutive 429s on multi-program configs.
+      // The SDK fires ~8 getProgramAccounts in parallel per program; 3s gives Helius rate
+      // limiters enough window to recover before the next program's burst begins.
       if (progIdx < programIds.length - 1) {
-        await new Promise((r) => setTimeout(r, 2_000));
+        await new Promise((r) => setTimeout(r, 3_000));
       }
     }
     const discovered = allFound;
@@ -779,11 +784,24 @@ export class CrankService {
     this._isRunning = true;
     logger.info("Crank service starting", { intervalMs: this.intervalMs, inactiveIntervalMs: this.inactiveIntervalMs });
 
-    this.discover().then(markets => {
-      logger.info("Initial discovery complete", { marketCount: markets.length });
-    }).catch(err => {
-      logger.error("Initial discovery failed", { error: err instanceof Error ? err.message : String(err), stack: err instanceof Error ? err.stack : undefined });
-    });
+    // Only fire a startup discovery if no markets are already loaded.
+    // index.ts runs discover() before calling start(), so on normal startup markets.size > 0
+    // and we skip this to avoid a redundant burst of getProgramAccounts calls that trigger
+    // 429s on Helius. If start() is called standalone (tests, hot-restart edge case) with
+    // empty markets, we still discover as expected.
+    if (this.markets.size === 0) {
+      logger.debug("start(): no pre-loaded markets — running initial discovery");
+      this.discover().then(markets => {
+        logger.info("Initial discovery complete", { marketCount: markets.length });
+      }).catch(err => {
+        logger.error("Initial discovery failed", { error: err instanceof Error ? err.message : String(err), stack: err instanceof Error ? err.stack : undefined });
+      });
+    } else {
+      logger.debug("start(): markets pre-loaded by caller — skipping redundant startup discover", {
+        marketCount: this.markets.size,
+        lastDiscoveryTime: this.lastDiscoveryTime,
+      });
+    }
 
     this.timer = setInterval(async () => {
       if (this._cycling) return; // Prevent overlapping cycles

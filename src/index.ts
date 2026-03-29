@@ -215,17 +215,55 @@ healthServer.listen(healthPort, () => {
   logger.info("Health endpoint started", { port: healthPort });
 });
 
+/**
+ * Escalating retry delays for startup market discovery.
+ * The SDK fires ~8 getProgramAccounts per program in parallel; on a fresh deploy
+ * the first call burst often 429s before finding any markets. Retrying with
+ * increasing delays recovers gracefully without crashing.
+ * Mirrors the indexer's INITIAL_RETRY_DELAYS pattern (MarketDiscovery.ts).
+ */
+const STARTUP_DISCOVERY_DELAYS_MS = [5_000, 15_000, 30_000, 60_000];
+
 async function start() {
   let markets: Awaited<ReturnType<typeof crankService.discover>> = [];
-  try {
-    markets = await crankService.discover();
-  } catch (err) {
-    // Don't crash on discovery failure — keep running and retry on next cycle
-    logger.warn("Initial market discovery failed — will retry on next cycle", {
-      error: err instanceof Error ? err.message : String(err),
-    });
+  let discoverySuccess = false;
+
+  for (let attempt = 0; attempt <= STARTUP_DISCOVERY_DELAYS_MS.length; attempt++) {
+    try {
+      markets = await crankService.discover();
+      if (markets.length > 0) {
+        discoverySuccess = true;
+        break;
+      }
+      // Got 0 markets — could be 429-throttled or fresh deploy with no slabs yet.
+      // Retry with backoff. On mainnet, 0 markets is unusual; log as warning.
+      if (attempt < STARTUP_DISCOVERY_DELAYS_MS.length) {
+        const delay = STARTUP_DISCOVERY_DELAYS_MS[attempt]!;
+        logger.warn("Startup discovery returned 0 markets — retrying", {
+          attempt: attempt + 1,
+          delayMs: delay,
+        });
+        await new Promise(r => setTimeout(r, delay));
+      }
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      if (attempt < STARTUP_DISCOVERY_DELAYS_MS.length) {
+        const delay = STARTUP_DISCOVERY_DELAYS_MS[attempt]!;
+        logger.warn("Startup discovery failed — retrying", {
+          attempt: attempt + 1,
+          delayMs: delay,
+          error: errMsg,
+        });
+        await new Promise(r => setTimeout(r, delay));
+      } else {
+        logger.warn("Startup discovery exhausted all retries — keeper will idle and retry on next cycle", {
+          error: errMsg,
+        });
+      }
+    }
   }
-  logger.info("Markets discovered", { count: markets.length });
+
+  logger.info("Markets discovered", { count: markets.length, discoverySuccess });
 
   if (markets.length === 0) {
     logger.info("No markets found — keeper will idle and retry discovery each cycle. This is normal for fresh mainnet deployments.");
