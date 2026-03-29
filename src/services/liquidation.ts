@@ -451,12 +451,12 @@ export class LiquidationService {
       });
       logger.info("Account liquidated", { accountIndex: accountIdx, slabAddress: slabAddress.toBase58(), signature: sig });
       
-      // Send Discord alert for liquidation execution
-      await sendWarningAlert("Liquidation executed", [
+      // Send Discord alert for liquidation execution — fire-and-forget; never let Discord errors crash the liquidation loop
+      sendWarningAlert("Liquidation executed", [
         { name: "Market", value: slabAddress.toBase58().slice(0, 8), inline: true },
         { name: "Account Index", value: accountIdx.toString(), inline: true },
         { name: "Signature", value: sig.slice(0, 12), inline: true },
-      ]);
+      ])?.catch(() => {});
       
       return sig;
     } catch (err) {
