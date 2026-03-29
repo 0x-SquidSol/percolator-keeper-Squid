@@ -291,3 +291,21 @@ async function shutdown(signal: string): Promise<void> {
 
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
+
+// Safety net: catch any unhandled rejections or exceptions so Railway doesn't kill
+// the process mid-cycle. Log the error, but keep the keeper alive for healthcheck
+// and retry on the next interval. Without these handlers, Node.js 15+ exits on
+// unhandled rejections by default, causing the crash-loop seen in Railway logs.
+process.on("unhandledRejection", (reason, promise) => {
+  logger.error("Unhandled promise rejection — keeping process alive", {
+    reason: reason instanceof Error ? reason.message : String(reason),
+    stack: reason instanceof Error ? reason.stack : undefined,
+  });
+});
+
+process.on("uncaughtException", (err) => {
+  logger.error("Uncaught exception — keeping process alive", {
+    error: err.message,
+    stack: err.stack,
+  });
+});

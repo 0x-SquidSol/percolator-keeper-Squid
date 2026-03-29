@@ -201,10 +201,13 @@ export class CrankService {
     const slabAddresses = discovered.map((m) => m.slabAddress.toBase58());
     let dbMarkets: Map<string, { dexPoolAddress?: string; mainnetCA?: string }> = new Map();
     try {
-      const { data } = await getSupabase()
+      const { data, error } = await getSupabase()
         .from("markets")
         .select("slab_address, dex_pool_address, mainnet_ca")
         .in("slab_address", slabAddresses);
+      if (error) {
+        logger.warn("Supabase market metadata query error", { error: error.message });
+      }
       if (data) {
         for (const row of data) {
           dbMarkets.set(row.slab_address, {
@@ -239,9 +242,12 @@ export class CrankService {
       } else {
         const state = this.markets.get(key)!;
         state.market = market;
-        // Update pool address and mainnetCA from Supabase on every discovery
-        if (dbMeta?.dexPoolAddress) state.dexPoolAddress = dbMeta.dexPoolAddress;
-        if (dbMeta?.mainnetCA) state.mainnetCA = dbMeta.mainnetCA;
+        // Update pool address and mainnetCA from Supabase on every discovery.
+        // Use explicit undefined check so a DB null/removal clears stale values (not just truthy-set).
+        if (dbMeta !== undefined) {
+          state.dexPoolAddress = dbMeta.dexPoolAddress;
+          state.mainnetCA = dbMeta.mainnetCA;
+        }
         state.missingDiscoveryCount = 0;
         // GH#1508: Reset foreignOracleSkipped on re-discovery — oracle authority may have changed.
         // crankMarket() will re-check and re-set it if the keeper is still not the authority.
@@ -313,6 +319,8 @@ export class CrankService {
   /**
    * Pyth-pinned mode: oracle_authority == [0;32] AND index_feed_id != [0;32].
    */
+  // TODO: isPythPinned is currently unused — retained for future Pyth-pinned-specific crank logic.
+  // If no Pyth-specific handling is added, consider removing to keep the class surface lean.
   private isPythPinned(market: DiscoveredMarket): boolean {
     const feedBytes = market.config.indexFeedId.toBytes();
     const isZeroFeed = feedBytes.every((b: number) => b === 0);
@@ -356,31 +364,26 @@ export class CrankService {
               slabAddress,
             });
           }
-          // Still try to crank (for funding/liquidation) even without oracle update
+          // No pool address → skip oracle update but still crank (funding/liquidation still work)
         } else {
-          try {
-            const hyperpData = encodeUpdateHyperpMark();
-            const poolKey = new PublicKey(state.dexPoolAddress);
+          // Build UpdateHyperpMark instruction. If this fails, throw so KeeperCrank
+          // is NOT sent with a stale oracle — avoids OracleInvalid (0xc) on-chain.
+          const hyperpData = encodeUpdateHyperpMark();
+          const poolKey = new PublicKey(state.dexPoolAddress);
 
-            // Build accounts: [slab(writable), pool(readonly), clock(readonly), ...remaining]
-            const hyperpKeys = [
-              { pubkey: market.slabAddress, isSigner: false, isWritable: true },
-              { pubkey: poolKey, isSigner: false, isWritable: false },
-              { pubkey: SYSVAR_CLOCK_PUBKEY, isSigner: false, isWritable: false },
-            ];
+          // Build accounts: [slab(writable), pool(readonly), clock(readonly), ...remaining]
+          const hyperpKeys = [
+            { pubkey: market.slabAddress, isSigner: false, isWritable: true },
+            { pubkey: poolKey, isSigner: false, isWritable: false },
+            { pubkey: SYSVAR_CLOCK_PUBKEY, isSigner: false, isWritable: false },
+          ];
 
-            // PumpSwap pools need vault0 + vault1 as remaining accounts
-            // For now, pass no remaining — Raydium CLMM doesn't need them
-            // TODO: detect pool type and add vault accounts for PumpSwap/Meteora
+          // PumpSwap pools need vault0 + vault1 as remaining accounts
+          // For now, pass no remaining — Raydium CLMM doesn't need them
+          // TODO: detect pool type and add vault accounts for PumpSwap/Meteora
 
-            instructions.push(buildIx({ programId, keys: hyperpKeys, data: hyperpData }));
-            state.hyperpNoPriceSkipped = false;
-          } catch (err) {
-            logger.warn("UpdateHyperpMark failed to build", {
-              slabAddress,
-              error: err instanceof Error ? err.message : String(err),
-            });
-          }
+          instructions.push(buildIx({ programId, keys: hyperpKeys, data: hyperpData }));
+          state.hyperpNoPriceSkipped = false;
         }
 
         // Crank instruction (always — handles funding, liquidation, GC)
@@ -539,13 +542,13 @@ export class CrankService {
         programId: market.programId.toBase58(),
       });
       
-      // Alert on 5+ consecutive failures
+      // Alert on 5+ consecutive failures — fire-and-forget; never let Discord errors crash the crank loop
       if (state.consecutiveFailures === 5) {
-        await sendCriticalAlert("Crank experiencing consecutive failures", [
+        sendCriticalAlert("Crank experiencing consecutive failures", [
           { name: "Market", value: slabAddress.slice(0, 12), inline: true },
           { name: "Consecutive Failures", value: state.consecutiveFailures.toString(), inline: true },
           { name: "Error", value: (err instanceof Error ? err.message : String(err)).slice(0, 100), inline: false },
-        ]);
+        ])?.catch(() => {});
       }
       
       eventBus.publish("crank.failure", slabAddress, {
