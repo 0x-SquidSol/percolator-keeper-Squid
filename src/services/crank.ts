@@ -302,19 +302,21 @@ export class CrankService {
 
   /**
    * True HYPERP mode: oracle_authority == [0;32] AND index_feed_id == [0;32].
-   * These markets use on-chain DEX pool reads — no off-chain price push needed.
+   * Uses toBytes() check — compatible with both real PublicKey and test mocks.
    */
   private isHyperpOracle(market: DiscoveredMarket): boolean {
-    return market.config.oracleAuthority.equals(PublicKey.default)
-      && market.config.indexFeedId.equals(PublicKey.default);
+    const feedBytes = market.config.indexFeedId.toBytes();
+    const isZeroFeed = feedBytes.every((b: number) => b === 0);
+    return !this.isAdminOracle(market) && isZeroFeed;
   }
 
   /**
    * Pyth-pinned mode: oracle_authority == [0;32] AND index_feed_id != [0;32].
    */
   private isPythPinned(market: DiscoveredMarket): boolean {
-    return market.config.oracleAuthority.equals(PublicKey.default)
-      && !market.config.indexFeedId.equals(PublicKey.default);
+    const feedBytes = market.config.indexFeedId.toBytes();
+    const isZeroFeed = feedBytes.every((b: number) => b === 0);
+    return !this.isAdminOracle(market) && !isZeroFeed;
   }
 
   /** Check if a market is due for cranking based on activity */
