@@ -4,6 +4,7 @@ import { config, createLogger, initSentry, captureException, sendInfoAlert, send
 import { OracleService } from "./services/oracle.js";
 import { CrankService } from "./services/crank.js";
 import { LiquidationService } from "./services/liquidation.js";
+import { AdlService } from "./services/adl.js";
 import { validateKeeperEnvGuards } from "./env-guards.js";
 import { isMainnet } from "./config/network.js";
 
@@ -33,6 +34,16 @@ logger.info("Keeper service starting");
 const oracleService = new OracleService();
 const crankService = new CrankService(oracleService);
 const liquidationService = new LiquidationService(oracleService);
+
+// ADL service — gated by ADL_ENABLED=true env var until on-chain instruction
+// (PERC-8273 T8) is live and T10 devnet upgrade is done (PERC-8275).
+const adlEnabled = process.env.ADL_ENABLED === "true";
+const adlService = adlEnabled ? new AdlService() : null;
+if (adlEnabled) {
+  logger.info("ADL service enabled (ADL_ENABLED=true)");
+} else {
+  logger.info("ADL service disabled — set ADL_ENABLED=true to enable (requires T8+T10)");
+}
 
 // Health state tracking
 let lastSuccessfulCrankTime = 0;
@@ -188,6 +199,21 @@ const healthServer = http.createServer((req, res) => {
       status = "down";
     }
     
+    // ADL stats
+    let adlStats: Record<string, unknown> | null = null;
+    if (adlService) {
+      const stats = adlService.getStats();
+      let totalAdlTxSent = 0;
+      let activeMarkets = 0;
+      for (const [, s] of stats) {
+        totalAdlTxSent += s.adlTxSent;
+        if (s.adlTxSent > 0) activeMarkets++;
+      }
+      adlStats = { enabled: true, totalAdlTxSent, activeMarkets };
+    } else {
+      adlStats = { enabled: false };
+    }
+
     const healthData = {
       status,
       lastCrankTime: mostRecentCrank,
@@ -195,6 +221,7 @@ const healthServer = http.createServer((req, res) => {
       marketsTracked,
       timeSinceLastCrankMs: timeSinceLastCrank === Infinity ? null : timeSinceLastCrank,
       timeSinceLastOracleMs: timeSinceLastOracle === Infinity ? null : timeSinceLastOracle,
+      adl: adlStats,
       monitors: {
         rpc: monitors.rpc.getStatus(),
         scan: monitors.scan.getStatus(),
@@ -273,6 +300,13 @@ async function start() {
   logger.info("Crank service started");
   liquidationService.start(() => crankService.getMarkets());
   logger.info("Liquidation scanner started");
+
+  // ADL service — starts only when ADL_ENABLED=true and markets are discovered.
+  // Depends on on-chain ExecuteAdl (tag 50) being live (T8/PERC-8273).
+  if (adlService) {
+    adlService.start(() => crankService.getMarkets());
+    logger.info("ADL service started");
+  }
   
   // Send startup alert
   await sendInfoAlert("Keeper service started", [
@@ -308,6 +342,12 @@ async function shutdown(signal: string): Promise<void> {
       });
     });
     
+    // Stop ADL service if running
+    if (adlService) {
+      logger.info("Stopping ADL service");
+      adlService.stop();
+    }
+
     // Stop crank service (clears timers, stops processing)
     logger.info("Stopping crank service");
     crankService.stop();
