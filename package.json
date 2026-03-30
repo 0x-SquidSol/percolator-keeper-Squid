@@ -13,7 +13,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@percolator/sdk": "github:dcccrypto/percolator-sdk#47e3799ff0e3daa31c995ea76f6a19f1ecba7425",
+    "@percolator/sdk": "github:dcccrypto/percolator-sdk#2c5f3b9bf781e2e400aaa93d7ba17d5e41762ede",
     "@percolator/shared": "github:dcccrypto/percolator-shared#c88a5b8031676ae1b1d7b4848c8633f8df94db73",
     "@solana/web3.js": "^1.98.0",
     "dotenv": "^16.4.7"
