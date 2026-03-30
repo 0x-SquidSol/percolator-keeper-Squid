@@ -808,8 +808,11 @@ export class CrankService {
       this._cycling = true;
       try {
         // Only rediscover periodically (default 5min) to avoid RPC rate limits
-        const needsDiscovery = this.markets.size === 0 ||
-          (Date.now() - this.lastDiscoveryTime >= this.discoveryIntervalMs);
+        // PERC-8235: Don't use markets.size===0 as a trigger to rediscover every tick.
+        // On mainnet with 0 markets, this causes discovery every 30s (crankIntervalMs),
+        // hammering RPC. Always respect discoveryIntervalMs (default 5min).
+        const needsDiscovery =
+          Date.now() - this.lastDiscoveryTime >= this.discoveryIntervalMs;
         if (needsDiscovery) {
           await this.discover();
         }
