@@ -162,7 +162,7 @@ export class CrankService {
 
       for (let attempt = 0; attempt <= CrankService.DISCOVER_429_BACKOFF_MS.length; attempt++) {
         try {
-          found = await discoverMarkets(discoveryConn, new PublicKey(id));
+          found = await discoverMarkets(discoveryConn, new PublicKey(id), { sequential: true, interTierDelayMs: 500 });
           programSuccess = true;
           logger.debug("Program scan complete", { programId: id, marketCount: found.length });
           break;
