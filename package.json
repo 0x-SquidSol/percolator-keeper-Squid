@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "@percolator/sdk": "github:dcccrypto/percolator-sdk#47e3799ff0e3daa31c995ea76f6a19f1ecba7425",
-    "@percolator/shared": "github:dcccrypto/percolator-shared",
+    "@percolator/shared": "github:dcccrypto/percolator-shared#1ad126faafa5b8a779ecbe590f9832e14a803e14",
     "@solana/web3.js": "^1.98.0",
     "dotenv": "^16.4.7"
   },
