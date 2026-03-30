@@ -1,13 +1,17 @@
 /**
- * ADL Service — PERC-8276 (T11): Auto-Deleverage crank loop
+ * ADL Service — PERC-8293 (T11): Auto-Deleverage crank loop
  *
- * Scaffolded before anchor T8 (PERC-8273) is complete. The service is
- * feature-flagged via env var `ADL_ENABLED=true` so it can run alongside
+ * Originally scaffolded as PERC-8276. Updated in T11 to add:
+ *   - Insurance fund utilization BPS threshold check
+ *   - Two-phase dispatch comments / scaffolding for T5 (PERC-8270)
+ *
+ * Feature-flagged via env var `ADL_ENABLED=true` so it can run alongside
  * the existing crank service without affecting production behaviour until
  * the on-chain instruction is live.
  *
  * Responsibilities:
- *  1. Per-market: fetch slab data, check `pnl_pos_tot > max_pnl_cap`
+ *  1. Per-market: fetch slab data, check `pnl_pos_tot > max_pnl_cap` OR
+ *     insurance fund utilization BPS > ADL_INSURANCE_UTIL_THRESHOLD_BPS
  *  2. When ADL is needed: rank all profitable positions by PnL%
  *  3. Call ExecuteAdl (tag 50) on the top-ranked position
  *  4. Repeat until pnl_pos_tot ≤ max_pnl_cap or no profitable positions remain
@@ -15,8 +19,9 @@
  * Two-phase crank note (T5/PERC-8270):
  *  The on-chain two-phase split (prepare + execute) lives in the Rust program.
  *  From the keeper's perspective the call signature is unchanged — we send a
- *  single KeeperCrank transaction. When T5 lands and the IDL changes, only
- *  this file and crank.ts need updating.
+ *  single KeeperCrank transaction. When T5 lands, update the
+ *  `PrepareAdlResult` / `PhaseOneKeeperArgs` types in crank-types.ts and wire
+ *  the prepare step here before the ExecuteAdl dispatch.
  *
  * Dependency surface:
  *  - @percolator/sdk:  fetchSlab, parseEngine, parseConfig, parseAllAccounts,
@@ -67,7 +72,7 @@ const ADL_INTERVAL_MS = Number(process.env.ADL_INTERVAL_MS ?? 10_000);
 const ADL_MAX_TX_PER_SCAN = Number(process.env.ADL_MAX_TX_PER_SCAN ?? 10);
 
 /**
- * Insurance fund balance threshold below which ADL kicks in.
+ * Insurance fund balance threshold below which ADL kicks in (raw lamports).
  * Set to 0 to rely solely on pnl_pos_tot > max_pnl_cap.
  *
  * Per PERC-305 spec: ADL is triggered when pnl_pos_tot > max_pnl_cap,
@@ -80,6 +85,24 @@ const ADL_INSURANCE_THRESHOLD = BigInt(
   process.env.ADL_INSURANCE_THRESHOLD_LAMPORTS ?? "0"
 );
 
+/**
+ * PERC-8293 (T11): Insurance fund utilization BPS threshold.
+ *
+ * ADL also triggers when the insurance fund is sufficiently drawn down,
+ * measured as:
+ *   utilization_bps = (fee_revenue - balance) * 10_000 / max(fee_revenue, 1)
+ *
+ * This captures the fraction of lifetime fee revenue that has been consumed
+ * by socialised losses.  When fee_revenue == 0 (fresh market), utilization is
+ * treated as 0 (not triggered).
+ *
+ * Default 8000 BPS = 80% utilization triggers ADL even before pnl_pos_tot
+ * exceeds max_pnl_cap.  Set to 0 to disable the utilization gate.
+ */
+const ADL_INSURANCE_UTIL_THRESHOLD_BPS = BigInt(
+  process.env.ADL_INSURANCE_UTIL_THRESHOLD_BPS ?? "8000"
+);
+
 // ─── types ─────────────────────────────────────────────────────────────────
 
 interface RankedPosition {
@@ -87,6 +110,30 @@ interface RankedPosition {
   pnlPct: bigint;   // PnL as % of capital × 1_000_000 (fixed-point)
   pnlAbs: bigint;   // Absolute positive PnL (raw)
   capital: bigint;
+}
+
+/**
+ * Result of the ADL trigger-check for a market.
+ * Exposed on the /api/adl/rankings endpoint for observability.
+ */
+export interface AdlTriggerState {
+  slabAddress: string;
+  pnlPosTot: string;
+  maxPnlCap: string;
+  insuranceFundBalance: string;
+  insuranceFundFeeRevenue: string;
+  insuranceUtilizationBps: number;
+  capExceeded: boolean;
+  insuranceDepleted: boolean;
+  utilizationTriggered: boolean;
+  adlNeeded: boolean;
+  rankings: Array<{
+    rank: number;
+    idx: number;
+    pnlAbs: string;
+    capital: string;
+    pnlPctMillionths: string;
+  }>;
 }
 
 interface AdlMarketState {
@@ -97,7 +144,72 @@ interface AdlMarketState {
 
 // ─── helpers ───────────────────────────────────────────────────────────────
 
-/** Returns true when ADL should run for this market given engine state. */
+/**
+ * Compute insurance fund utilization in BPS.
+ *
+ * utilization_bps = (fee_revenue - balance) * 10_000 / max(fee_revenue, 1)
+ *
+ * Clamped to [0, 10_000].  When fee_revenue == 0 (fresh market), returns 0.
+ */
+function computeInsuranceUtilizationBps(
+  balance: bigint,
+  feeRevenue: bigint
+): bigint {
+  if (feeRevenue === 0n) return 0n;
+  const consumed = feeRevenue > balance ? feeRevenue - balance : 0n;
+  const bps = (consumed * 10_000n) / feeRevenue;
+  return bps > 10_000n ? 10_000n : bps;
+}
+
+/** Returns a structured trigger state for a market. */
+function checkAdlTrigger(
+  pnlPosTot: bigint,
+  maxPnlCap: bigint,
+  insuranceFundBalance: bigint,
+  insuranceFundFeeRevenue: bigint,
+  slabAddress: string,
+  data: Uint8Array
+): Omit<AdlTriggerState, "rankings"> & { excess: bigint } {
+  const capExceeded = maxPnlCap > 0n && pnlPosTot > maxPnlCap;
+  const insuranceDepleted =
+    ADL_INSURANCE_THRESHOLD > 0n &&
+    insuranceFundBalance < ADL_INSURANCE_THRESHOLD;
+  const utilizationBps = computeInsuranceUtilizationBps(
+    insuranceFundBalance,
+    insuranceFundFeeRevenue
+  );
+  const utilizationTriggered =
+    ADL_INSURANCE_UTIL_THRESHOLD_BPS > 0n &&
+    utilizationBps >= ADL_INSURANCE_UTIL_THRESHOLD_BPS;
+
+  // ADL disabled if max_pnl_cap == 0 UNLESS insurance utilization gate fires
+  const adlNeeded =
+    capExceeded || insuranceDepleted || utilizationTriggered;
+
+  const excess =
+    capExceeded && maxPnlCap > 0n
+      ? pnlPosTot - maxPnlCap
+      : pnlPosTot; // Use full pnlPosTot as excess when triggered by insurance
+
+  return {
+    slabAddress,
+    pnlPosTot: pnlPosTot.toString(),
+    maxPnlCap: maxPnlCap.toString(),
+    insuranceFundBalance: insuranceFundBalance.toString(),
+    insuranceFundFeeRevenue: insuranceFundFeeRevenue.toString(),
+    insuranceUtilizationBps: Number(utilizationBps),
+    capExceeded,
+    insuranceDepleted,
+    utilizationTriggered,
+    adlNeeded,
+    excess,
+  };
+}
+
+/**
+ * @deprecated Use checkAdlTrigger instead.
+ * Returns true when ADL should run for this market given engine state.
+ */
 function isAdlNeeded(
   pnlPosTot: bigint,
   maxPnlCap: bigint,
@@ -167,6 +279,49 @@ export class AdlService {
   }
 
   /**
+   * PERC-8293 (T11): Fetch on-chain state and return ADL trigger info + position
+   * rankings for a single market without sending any transactions.
+   *
+   * Used by the /api/adl/rankings API endpoint.
+   */
+  async getAdlState(slabAddress: string, market: DiscoveredMarket): Promise<AdlTriggerState> {
+    const connection = getConnection();
+
+    let data: Uint8Array;
+    try {
+      data = await fetchSlab(connection, market.slabAddress);
+    } catch (err) {
+      throw new Error(`fetchSlab failed for ${slabAddress}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    const engine = parseEngine(data);
+    const cfg = parseConfig(data);
+
+    const trigger = checkAdlTrigger(
+      engine.pnlPosTot,
+      cfg.maxPnlCap,
+      engine.insuranceFund.balance,
+      engine.insuranceFund.feeRevenue,
+      slabAddress,
+      data
+    );
+
+    let rankings: AdlTriggerState["rankings"] = [];
+    if (trigger.adlNeeded) {
+      const ranked = rankProfitablePositions(data, trigger.excess);
+      rankings = ranked.map((r, i) => ({
+        rank: i + 1,
+        idx: r.idx,
+        pnlAbs: r.pnlAbs.toString(),
+        capital: r.capital.toString(),
+        pnlPctMillionths: r.pnlPct.toString(),
+      }));
+    }
+
+    return { ...trigger, rankings };
+  }
+
+  /**
    * Scan one market for ADL conditions.
    * Returns number of ExecuteAdl transactions sent (0 if ADL not needed).
    */
@@ -187,26 +342,50 @@ export class AdlService {
     }
 
     const engine = parseEngine(data);
-    const config = parseConfig(data);
+    const cfg = parseConfig(data);
 
-    const pnlPosTot = engine.pnlPosTot;
-    const maxPnlCap = config.maxPnlCap;
-    const insuranceFundBalance = engine.insuranceFund.balance;
+    const trigger = checkAdlTrigger(
+      engine.pnlPosTot,
+      cfg.maxPnlCap,
+      engine.insuranceFund.balance,
+      engine.insuranceFund.feeRevenue,
+      slabAddress,
+      data
+    );
 
-    if (!isAdlNeeded(pnlPosTot, maxPnlCap, insuranceFundBalance)) {
+    if (!trigger.adlNeeded) {
       return 0;
     }
 
-    const excess = pnlPosTot - maxPnlCap;
+    const { excess } = trigger;
     logger.info("ADL triggered for market", {
       slabAddress,
-      pnlPosTot: pnlPosTot.toString(),
-      maxPnlCap: maxPnlCap.toString(),
+      pnlPosTot: trigger.pnlPosTot,
+      maxPnlCap: trigger.maxPnlCap,
       excess: excess.toString(),
-      insuranceFundBalance: insuranceFundBalance.toString(),
+      insuranceFundBalance: trigger.insuranceFundBalance,
+      insuranceUtilizationBps: trigger.insuranceUtilizationBps,
+      capExceeded: trigger.capExceeded,
+      utilizationTriggered: trigger.utilizationTriggered,
     });
 
-    // Rank profitable positions
+    // ── T5 two-phase hook (PERC-8270) ─────────────────────────────────────
+    // When anchor T5 lands, add a PrepareAdl instruction dispatch here before
+    // executing ExecuteAdl. The prepare phase reads oracle/price state and
+    // writes a PrepareAdlResult PDA that the execute phase consumes.
+    //
+    // Pseudocode for when T5 is live:
+    //   const prepareData = encodePrepareAdl({ ...args });
+    //   const prepareSig = await sendWithRetryKeeper(conn, [buildIx(...)], [keypair]);
+    //   const prepareResult = await fetchPrepareAdlResult(conn, prepareResultPda);
+    //
+    // See crank-types.ts → PrepareAdlArgs / PrepareAdlResult for the scaffold.
+    // ──────────────────────────────────────────────────────────────────────
+
+    // Derive oracle key (same logic as crank.ts)
+    const pConfig = cfg;
+
+    // Rank profitable positions (reuse trigger.excess calculated above)
     const ranked = rankProfitablePositions(data, excess);
     if (ranked.length === 0) {
       logger.warn("ADL: pnl_pos_tot exceeds cap but no profitable positions found — stale state?", {
@@ -216,9 +395,9 @@ export class AdlService {
     }
 
     // Determine oracle key (same logic as crank.ts)
-    const feedBytes = config.indexFeedId.toBytes();
+    const feedBytes = pConfig.indexFeedId.toBytes();
     const isZeroFeed = feedBytes.every((b: number) => b === 0);
-    const isAdminOracle = !config.oracleAuthority.equals(PublicKey.default);
+    const isAdminOracle = !pConfig.oracleAuthority.equals(PublicKey.default);
 
     let oracleKey: PublicKey;
     if (isAdminOracle || isZeroFeed) {
