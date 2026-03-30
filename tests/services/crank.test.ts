@@ -895,6 +895,7 @@ describe('CrankService', () => {
       expect(core.discoverMarkets).toHaveBeenCalledWith(
         expect.anything(),
         expect.anything(),
+        expect.anything(),
       );
     });
 
