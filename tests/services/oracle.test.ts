@@ -38,6 +38,7 @@ vi.mock('@percolator/shared', () => ({
     if (err instanceof Error) return err.message;
     return String(err);
   }),
+  sendWarningAlert: vi.fn(),
 }));
 
 import { OracleService } from '../../src/services/oracle.js';
