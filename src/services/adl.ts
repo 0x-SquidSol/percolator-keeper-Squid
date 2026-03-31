@@ -58,18 +58,41 @@ const logger = createLogger("keeper:adl");
 
 // ─── tunables ──────────────────────────────────────────────────────────────
 
+function parseIntEnv(name: string, fallback: number, min = 0): number {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  const parsed = parseInt(raw, 10);
+  if (isNaN(parsed) || parsed < min) {
+    throw new Error(
+      `Invalid ${name}=${raw} — must be an integer >= ${min} (default: ${fallback})`,
+    );
+  }
+  return parsed;
+}
+
+function parseBigIntEnv(name: string, fallback: string): bigint {
+  const raw = process.env[name] ?? fallback;
+  try {
+    return BigInt(raw);
+  } catch {
+    throw new Error(
+      `Invalid ${name}=${raw} — must be a valid integer string (default: ${fallback})`,
+    );
+  }
+}
+
 /**
  * How often to run the ADL scan loop in milliseconds.
  * Default 10 s — fast enough to clear excess PnL promptly; slow enough to
  * avoid hammering RPC on quiet markets.
  */
-const ADL_INTERVAL_MS = Number(process.env.ADL_INTERVAL_MS ?? 10_000);
+const ADL_INTERVAL_MS = parseIntEnv("ADL_INTERVAL_MS", 10_000, 1000);
 
 /**
  * Maximum number of ExecuteAdl transactions sent per market per ADL scan.
  * Guards against runaway loops if on-chain state is not updating between cycles.
  */
-const ADL_MAX_TX_PER_SCAN = Number(process.env.ADL_MAX_TX_PER_SCAN ?? 10);
+const ADL_MAX_TX_PER_SCAN = parseIntEnv("ADL_MAX_TX_PER_SCAN", 10, 1);
 
 /**
  * Insurance fund balance threshold below which ADL kicks in (raw lamports).
@@ -81,8 +104,8 @@ const ADL_MAX_TX_PER_SCAN = Number(process.env.ADL_MAX_TX_PER_SCAN ?? 10);
  *
  * Unit: raw lamports (bigint).  Default 0 = disabled.
  */
-const ADL_INSURANCE_THRESHOLD = BigInt(
-  process.env.ADL_INSURANCE_THRESHOLD_LAMPORTS ?? "0"
+const ADL_INSURANCE_THRESHOLD = parseBigIntEnv(
+  "ADL_INSURANCE_THRESHOLD_LAMPORTS", "0"
 );
 
 /**
@@ -99,8 +122,8 @@ const ADL_INSURANCE_THRESHOLD = BigInt(
  * Default 8000 BPS = 80% utilization triggers ADL even before pnl_pos_tot
  * exceeds max_pnl_cap.  Set to 0 to disable the utilization gate.
  */
-const ADL_INSURANCE_UTIL_THRESHOLD_BPS = BigInt(
-  process.env.ADL_INSURANCE_UTIL_THRESHOLD_BPS ?? "8000"
+const ADL_INSURANCE_UTIL_THRESHOLD_BPS = parseBigIntEnv(
+  "ADL_INSURANCE_UTIL_THRESHOLD_BPS", "8000"
 );
 
 // ─── types ─────────────────────────────────────────────────────────────────
