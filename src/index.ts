@@ -17,7 +17,12 @@ initSentry("keeper");
 const logger = createLogger("keeper");
 
 if (!process.env.CRANK_KEYPAIR) {
-  throw new Error("CRANK_KEYPAIR must be set for keeper service");
+  if (process.env.KEEPER_PRIVATE_KEY) {
+    logger.warn("KEEPER_PRIVATE_KEY is deprecated — rename to CRANK_KEYPAIR in your .env");
+    process.env.CRANK_KEYPAIR = process.env.KEEPER_PRIVATE_KEY;
+  } else {
+    throw new Error("CRANK_KEYPAIR must be set for keeper service");
+  }
 }
 
 validateKeeperEnvGuards();
