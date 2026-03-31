@@ -268,6 +268,8 @@ export class AdlService {
   private _getMarkets: (() => Map<string, MarketCrankState>) | null = null;
   private _isRunning = false;
   private _cycling = false;
+  // Cache keypair at construction — avoids re-parsing from env on every scanMarket() call
+  private readonly _keypair = loadKeypair(process.env.CRANK_KEYPAIR!);
 
   /** Inject the crank service's market map so ADL can iterate tracked markets. */
   setMarketSource(fn: () => Map<string, MarketCrankState>): void {
@@ -327,7 +329,7 @@ export class AdlService {
    */
   async scanMarket(slabAddress: string, market: DiscoveredMarket): Promise<number> {
     const connection = getConnection();
-    const keypair = loadKeypair(process.env.CRANK_KEYPAIR!);
+    const keypair = this._keypair;
     const programId = market.programId;
 
     let data: Uint8Array;

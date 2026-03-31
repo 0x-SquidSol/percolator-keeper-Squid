@@ -150,6 +150,8 @@ export class LiquidationService {
   // PERC-484: Track markets that permanently fail with InvalidSlabLen (0x4).
   // These are test/corrupt markets with wrong slab size — skip them indefinitely.
   private readonly permanentlySkipped = new Set<string>();
+  // Cache keypair at construction — avoids re-parsing from env on every liquidate() call
+  private readonly _keypair = loadKeypair(process.env.CRANK_KEYPAIR!);
 
   constructor(oracleService: OracleService, intervalMs = 60_000) {
     this.oracleService = oracleService;
@@ -333,7 +335,7 @@ export class LiquidationService {
 
     try {
       const connection = getConnection();
-      const keypair = loadKeypair(process.env.CRANK_KEYPAIR!);
+      const keypair = this._keypair;
       const programId = market.programId;
 
       // Build multi-instruction tx: push price → crank → liquidate
