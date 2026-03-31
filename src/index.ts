@@ -1,5 +1,6 @@
 import "dotenv/config";
 import http from "node:http";
+import { timingSafeEqual } from "node:crypto";
 import { config, createLogger, initSentry, captureException, sendInfoAlert, sendCriticalAlert, createServiceMonitors } from "@percolator/shared";
 import { OracleService } from "./services/oracle.js";
 import { CrankService } from "./services/crank.js";
@@ -125,20 +126,50 @@ const healthServer = http.createServer((req, res) => {
       res.end(JSON.stringify({ success: false, message: "Endpoint not configured" }));
       return;
     }
-    const provided = req.headers["x-shared-secret"] ?? "";
-    if (provided !== registerSecret) {
+    const provided = String(req.headers["x-shared-secret"] ?? "");
+    const secretBuf = Buffer.from(registerSecret, "utf8");
+    const providedBuf = Buffer.from(provided, "utf8");
+    const lengthMatch = secretBuf.length === providedBuf.length;
+    const safeBuf = lengthMatch ? providedBuf : secretBuf;
+    if (!lengthMatch || !timingSafeEqual(secretBuf, safeBuf)) {
       res.writeHead(401, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ success: false, message: "Unauthorized" }));
       return;
     }
+
+    const MAX_BODY_BYTES = 4096;
     let body = "";
-    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    let exceeded = false;
+    req.on("data", (chunk: Buffer) => {
+      if (exceeded) return;
+      body += chunk.toString();
+      if (Buffer.byteLength(body) > MAX_BODY_BYTES) {
+        exceeded = true;
+        res.writeHead(413, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ success: false, message: "Payload too large" }));
+        req.destroy();
+      }
+    });
     req.on("end", async () => {
+      if (exceeded) return;
       try {
-        const { slabAddress, mainnetCA } = JSON.parse(body) as { slabAddress?: string; mainnetCA?: string };
-        if (!slabAddress) {
+        const parsed = JSON.parse(body) as { slabAddress?: string; mainnetCA?: string };
+        const { slabAddress, mainnetCA } = parsed;
+        if (!slabAddress || typeof slabAddress !== "string") {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ success: false, message: "slabAddress is required" }));
+          return;
+        }
+        // Solana base58 addresses are 32–44 characters of [1-9A-HJ-NP-Za-km-z]
+        const base58Re = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+        if (!base58Re.test(slabAddress)) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ success: false, message: "Invalid slabAddress format" }));
+          return;
+        }
+        if (mainnetCA !== undefined && (typeof mainnetCA !== "string" || !base58Re.test(mainnetCA))) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ success: false, message: "Invalid mainnetCA format" }));
           return;
         }
         const result = await crankService.registerMarket(slabAddress, mainnetCA);
