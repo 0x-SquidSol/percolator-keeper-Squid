@@ -142,8 +142,14 @@ const healthServer = http.createServer((req, res) => {
           return;
         }
         const result = await crankService.registerMarket(slabAddress, mainnetCA);
+        if (!result.success) {
+          logger.warn("registerMarket failed", { slabAddress, detail: result.message });
+        }
+        const safeMessage = result.success
+          ? result.message
+          : "Registration failed";
         res.writeHead(result.success ? 200 : 422, { "Content-Type": "application/json" });
-        res.end(JSON.stringify(result));
+        res.end(JSON.stringify({ success: result.success, message: safeMessage }));
       } catch (err) {
         logger.error("Register endpoint error", { error: err instanceof Error ? err.message : String(err) });
         res.writeHead(500, { "Content-Type": "application/json" });
