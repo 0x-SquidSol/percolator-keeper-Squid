@@ -22,7 +22,8 @@ const PRICE_E6_MULTIPLIER = 1_000_000; // Price precision (6 decimals)
 const CACHED_PRICE_MAX_AGE_MS = 60_000; // Reject cached prices older than 60s
 
 // Cross-source validation: reject if DexScreener and Jupiter diverge by more than this %
-const MAX_CROSS_SOURCE_DEVIATION_PCT = 10;
+// Expressed in basis points (100 bps = 1%) for precise integer comparison
+const MAX_CROSS_SOURCE_DEVIATION_BPS = 1000; // 10.00%
 
 // DexScreener rate limit: cache responses for 10s to avoid hitting limits
 const dexScreenerCache = new Map<string, { data: DexScreenerResponse; fetchedAt: number }>();
@@ -170,13 +171,13 @@ export class OracleService {
     if (dexPrice !== null && jupPrice !== null && dexPrice > 0n && jupPrice > 0n) {
       const larger = dexPrice > jupPrice ? dexPrice : jupPrice;
       const smaller = dexPrice > jupPrice ? jupPrice : dexPrice;
-      const divergencePct = Number((larger - smaller) * 100n / smaller);
+      const divergenceBps = Number((larger - smaller) * 10_000n / smaller);
 
-      if (divergencePct > MAX_CROSS_SOURCE_DEVIATION_PCT) {
+      if (divergenceBps > MAX_CROSS_SOURCE_DEVIATION_BPS) {
         logger.warn("Cross-source divergence detected", {
           mint,
-          divergencePct,
-          maxAllowed: MAX_CROSS_SOURCE_DEVIATION_PCT,
+          divergenceBps,
+          maxAllowed: MAX_CROSS_SOURCE_DEVIATION_BPS,
           dexPrice: dexPrice.toString(),
           jupPrice: jupPrice.toString()
         });
@@ -211,18 +212,19 @@ export class OracleService {
     }
 
     // R2-S4: Historical deviation check — reject if >30% change from last known price
+    const HISTORICAL_DEVIATION_MAX_BPS = 3000; // 30.00%
     const history = this.priceHistory.get(slabAddress);
     if (history && history.length > 0) {
       const lastPrice = history[history.length - 1].priceE6;
       if (lastPrice > 0n) {
-        const deviation = priceE6 > lastPrice
-          ? Number((priceE6 - lastPrice) * 100n / lastPrice)
-          : Number((lastPrice - priceE6) * 100n / lastPrice);
-        if (deviation > 30) {
+        const deviationBps = priceE6 > lastPrice
+          ? Number((priceE6 - lastPrice) * 10_000n / lastPrice)
+          : Number((lastPrice - priceE6) * 10_000n / lastPrice);
+        if (deviationBps > HISTORICAL_DEVIATION_MAX_BPS) {
           logger.warn("Price deviation exceeds threshold", {
             mint,
-            deviation,
-            threshold: 30,
+            deviationBps,
+            thresholdBps: HISTORICAL_DEVIATION_MAX_BPS,
             lastPrice: lastPrice.toString(),
             newPrice: priceE6.toString(),
             source
