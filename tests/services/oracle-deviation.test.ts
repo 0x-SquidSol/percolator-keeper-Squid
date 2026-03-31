@@ -79,8 +79,8 @@ function mockBothSources(dexUsd: number | null, jupUsd: number | null, mint?: st
     : { data: {} };
 
   vi.mocked(fetch)
-    .mockResolvedValueOnce({ json: async () => dexResp } as Response)
-    .mockResolvedValueOnce({ json: async () => jupResp } as Response);
+    .mockResolvedValueOnce({ ok: true, json: async () => dexResp } as Response)
+    .mockResolvedValueOnce({ ok: true, json: async () => jupResp } as Response);
 }
 
 function toE6(usd: number): bigint {
@@ -193,8 +193,8 @@ describe('Cross-source deviation — actual boundary conditions', () => {
     const mint = freshMint();
     // priceUsd='0' → parseFloat=0 → fails >0 check → treated as null → fallback to Jupiter
     vi.mocked(fetch)
-      .mockResolvedValueOnce({ json: async () => ({ pairs: [{ priceUsd: '0', liquidity: { usd: 500_000 } }] }) } as Response)
-      .mockResolvedValueOnce({ json: async () => ({ data: { [mint]: { price: '1.00' } } }) } as Response);
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ pairs: [{ priceUsd: '0', liquidity: { usd: 500_000 } }] }) } as Response)
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ data: { [mint]: { price: '1.00' } } }) } as Response);
     const r = await svc.fetchPrice(mint, freshSlab());
     expect(r).not.toBeNull();
     expect(r!.source).toBe('jupiter');

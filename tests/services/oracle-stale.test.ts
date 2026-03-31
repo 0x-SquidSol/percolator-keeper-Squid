@@ -63,10 +63,10 @@ describe('OracleService.getStaleMarkets', () => {
     // Seed price history via fetchPrice (no pushPrice call → lastPushTime stays 0)
     vi.mocked(fetch)
       .mockResolvedValueOnce({
-        json: async () => ({ pairs: [{ priceUsd: '1.00', liquidity: { usd: 100000 } }] }),
+        ok: true, json: async () => ({ pairs: [{ priceUsd: '1.00', liquidity: { usd: 100000 } }] }),
       } as any)
       .mockResolvedValueOnce({
-        json: async () => ({ data: { MINT_A: { price: '1.00' } } }),
+        ok: true, json: async () => ({ data: { MINT_A: { price: '1.00' } } }),
       } as any);
 
     await oracle.fetchPrice('MINT_A', 'SLAB_A');
@@ -88,10 +88,10 @@ describe('OracleService.getStaleMarkets', () => {
 
     vi.mocked(fetch)
       .mockResolvedValueOnce({
-        json: async () => ({ pairs: [{ priceUsd: '1.00', liquidity: { usd: 100000 } }] }),
+        ok: true, json: async () => ({ pairs: [{ priceUsd: '1.00', liquidity: { usd: 100000 } }] }),
       } as any)
       .mockResolvedValueOnce({
-        json: async () => ({ data: { [solMint]: { price: '1.00' } } }),
+        ok: true, json: async () => ({ data: { [solMint]: { price: '1.00' } } }),
       } as any);
 
     const pushed = await oracle.pushPrice(slabAddr, mockMarketConfig);
@@ -109,10 +109,10 @@ describe('OracleService.getStaleMarkets', () => {
     // Seed market with price history but no push
     vi.mocked(fetch)
       .mockResolvedValueOnce({
-        json: async () => ({ pairs: [{ priceUsd: '2.00', liquidity: { usd: 100000 } }] }),
+        ok: true, json: async () => ({ pairs: [{ priceUsd: '2.00', liquidity: { usd: 100000 } }] }),
       } as any)
       .mockResolvedValueOnce({
-        json: async () => ({ data: { MINT_C: { price: '2.00' } } }),
+        ok: true, json: async () => ({ data: { MINT_C: { price: '2.00' } } }),
       } as any);
 
     await oracle.fetchPrice('MINT_C', 'SLAB_C');
@@ -131,19 +131,19 @@ describe('OracleService.getStaleMarkets', () => {
     // Seed two markets
     vi.mocked(fetch)
       .mockResolvedValueOnce({
-        json: async () => ({ pairs: [{ priceUsd: '1.00', liquidity: { usd: 100000 } }] }),
+        ok: true, json: async () => ({ pairs: [{ priceUsd: '1.00', liquidity: { usd: 100000 } }] }),
       } as any)
       .mockResolvedValueOnce({
-        json: async () => ({ data: { MINT_X: { price: '1.00' } } }),
+        ok: true, json: async () => ({ data: { MINT_X: { price: '1.00' } } }),
       } as any);
     await oracle.fetchPrice('MINT_X', 'SLAB_X');
 
     vi.mocked(fetch)
       .mockResolvedValueOnce({
-        json: async () => ({ pairs: [{ priceUsd: '3.00', liquidity: { usd: 50000 } }] }),
+        ok: true, json: async () => ({ pairs: [{ priceUsd: '3.00', liquidity: { usd: 50000 } }] }),
       } as any)
       .mockResolvedValueOnce({
-        json: async () => ({ data: { MINT_Y: { price: '3.00' } } }),
+        ok: true, json: async () => ({ data: { MINT_Y: { price: '3.00' } } }),
       } as any);
     await oracle.fetchPrice('MINT_Y', 'SLAB_Y');
 
