@@ -24,6 +24,10 @@ const CACHED_PRICE_MAX_AGE_MS = 60_000; // Reject cached prices older than 60s
 // Cross-source validation: reject if DexScreener and Jupiter diverge by more than this %
 const MAX_CROSS_SOURCE_DEVIATION_PCT = 10;
 
+// Reject DexScreener pairs with liquidity below this threshold — low-liquidity
+// pairs are trivially manipulable and should not be trusted for price discovery.
+const MIN_LIQUIDITY_USD = 1_000;
+
 // DexScreener rate limit: cache responses for 10s to avoid hitting limits
 const dexScreenerCache = new Map<string, { data: DexScreenerResponse; fetchedAt: number }>();
 const DEX_SCREENER_CACHE_TTL_MS = 10_000;
@@ -79,6 +83,7 @@ export class OracleService {
           // Cache hit — return cached value
           const pair = sortPairsByLiquidity(cached.data.pairs)?.[0];
           if (!pair?.priceUsd) return null;
+          if ((pair.liquidity?.usd ?? 0) < MIN_LIQUIDITY_USD) return null;
           const p = parseFloat(pair.priceUsd);
           if (!isFinite(p) || p <= 0) return null;
           return BigInt(Math.round(p * PRICE_E6_MULTIPLIER));
@@ -102,6 +107,7 @@ export class OracleService {
 
       const pair = sortPairsByLiquidity(json.pairs)?.[0];
       if (!pair?.priceUsd) return null;
+      if ((pair.liquidity?.usd ?? 0) < MIN_LIQUIDITY_USD) return null;
       const parsed = parseFloat(pair.priceUsd);
       if (!isFinite(parsed) || parsed <= 0) return null;
       return BigInt(Math.round(parsed * PRICE_E6_MULTIPLIER));
