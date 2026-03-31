@@ -268,6 +268,7 @@ export class AdlService {
   private _getMarkets: (() => Map<string, MarketCrankState>) | null = null;
   private _isRunning = false;
   private _cycling = false;
+  private _cycleStartedAt = 0;
 
   /** Inject the crank service's market map so ADL can iterate tracked markets. */
   setMarketSource(fn: () => Map<string, MarketCrankState>): void {
@@ -522,9 +523,26 @@ export class AdlService {
 
     logger.info("ADL service starting", { intervalMs: ADL_INTERVAL_MS });
 
+    const MAX_CYCLE_MS = ADL_INTERVAL_MS * 5;
+
     this.timer = setInterval(async () => {
-      if (this._cycling) return;
+      if (this._cycling) {
+        const elapsed = Date.now() - this._cycleStartedAt;
+        if (elapsed > MAX_CYCLE_MS) {
+          logger.error("ADL cycle watchdog: cycle exceeded max duration, force-resetting", {
+            elapsedMs: elapsed,
+            maxCycleMs: MAX_CYCLE_MS,
+          });
+          sendWarningAlert("ADL cycle hung — watchdog reset", [
+            { name: "Elapsed", value: `${Math.round(elapsed / 1000)}s`, inline: true },
+            { name: "Max", value: `${Math.round(MAX_CYCLE_MS / 1000)}s`, inline: true },
+          ])?.catch(() => {});
+          this._cycling = false;
+        }
+        return;
+      }
       this._cycling = true;
+      this._cycleStartedAt = Date.now();
       try {
         const result = await this.scanAll();
         if (result.triggered > 0) {
