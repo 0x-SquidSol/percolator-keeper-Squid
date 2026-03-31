@@ -768,19 +768,22 @@ describe('CrankService', () => {
       // fetchPrice returns null (no DEX data for either market)
       mockOracleService.fetchPrice = vi.fn().mockResolvedValue(null);
 
-      await localCrank.discover();
+      try {
+        await localCrank.discover();
 
-      const result = await localCrank.crankAll();
+        const result = await localCrank.crankAll();
 
-      // Hyperp no-price market → skipped (not failed)
-      expect(result.failed).toBe(0);
-      // Normal market with existing on-chain price (authorityPriceE6 > 0) should crank successfully
-      expect(result.success).toBeGreaterThanOrEqual(1);
+        // Hyperp no-price market → skipped (not failed)
+        expect(result.failed).toBe(0);
+        // Normal market with existing on-chain price (authorityPriceE6 > 0) should crank successfully
+        expect(result.success).toBeGreaterThanOrEqual(1);
 
-      // Flag should be set on hyperp zero-price market
-      const hyperpState = localCrank.getMarkets().get(slabHyperp)!;
-      expect(hyperpState.hyperpNoPriceSkipped).toBe(true);
-      localCrank.stop();
+        // Flag should be set on hyperp zero-price market
+        const hyperpState = localCrank.getMarkets().get(slabHyperp)!;
+        expect(hyperpState.hyperpNoPriceSkipped).toBe(true);
+      } finally {
+        localCrank.stop();
+      }
     });
 
     it('PERC-1254: should crank Hyperp market once fetchPrice returns a valid price', async () => {
@@ -826,24 +829,27 @@ describe('CrankService', () => {
 
       vi.mocked(core.discoverMarkets).mockResolvedValue([hyperpMarket as any]);
 
-      // First cycle: no price
-      mockOracleService.fetchPrice = vi.fn().mockResolvedValue(null);
-      await localCrank.discover();
-      const result1 = await localCrank.crankAll();
-      expect(result1.failed).toBe(0);
-      const stateAfterSkip = localCrank.getMarkets().get(slabHyperp)!;
-      expect(stateAfterSkip.hyperpNoPriceSkipped).toBe(true);
+      try {
+        // First cycle: no price
+        mockOracleService.fetchPrice = vi.fn().mockResolvedValue(null);
+        await localCrank.discover();
+        const result1 = await localCrank.crankAll();
+        expect(result1.failed).toBe(0);
+        const stateAfterSkip = localCrank.getMarkets().get(slabHyperp)!;
+        expect(stateAfterSkip.hyperpNoPriceSkipped).toBe(true);
 
-      // Second cycle: price available — should clear flag and crank
-      mockOracleService.fetchPrice = vi.fn().mockResolvedValue({ priceE6: BigInt(75_000_000) });
-      // Simulate discovery reset (as discover() does)
-      stateAfterSkip.hyperpNoPriceSkipped = false;
+        // Second cycle: price available — should clear flag and crank
+        mockOracleService.fetchPrice = vi.fn().mockResolvedValue({ priceE6: BigInt(75_000_000) });
+        // Simulate discovery reset (as discover() does)
+        stateAfterSkip.hyperpNoPriceSkipped = false;
 
-      const result2 = await localCrank.crankMarket(slabHyperp);
-      expect(result2).toBe(true);
-      const stateAfterCrank = localCrank.getMarkets().get(slabHyperp)!;
-      expect(stateAfterCrank.hyperpNoPriceSkipped).toBeFalsy();
-      localCrank.stop();
+        const result2 = await localCrank.crankMarket(slabHyperp);
+        expect(result2).toBe(true);
+        const stateAfterCrank = localCrank.getMarkets().get(slabHyperp)!;
+        expect(stateAfterCrank.hyperpNoPriceSkipped).toBeFalsy();
+      } finally {
+        localCrank.stop();
+      }
     });
 
     it('PERC-1254: should reset hyperpNoPriceSkipped flag on rediscovery', async () => {
