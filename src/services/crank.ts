@@ -505,6 +505,10 @@ export class CrankService {
       state.isActive = true;
       if (state.failureCount > 0) state.failureCount = 0;
 
+      if (pricePushQueued) {
+        this.oracleService.recordPushTime(slabAddress);
+      }
+
       eventBus.publish("crank.success", slabAddress, { signature: sig });
       return true;
     } catch (err) {
