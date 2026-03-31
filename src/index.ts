@@ -120,6 +120,32 @@ crankService.getMarkets().forEach((_, slabAddress) => {
 // Health endpoint
 const startupTime = Date.now();
 const healthPort = Number(process.env.KEEPER_HEALTH_PORT ?? 8081);
+
+// Rate limiter for /register: max 5 failed auth attempts per IP per 60 seconds.
+// Prevents brute-force attacks against the shared secret.
+const REGISTER_RATE_WINDOW_MS = 60_000;
+const REGISTER_RATE_MAX_FAILURES = 5;
+const registerFailures = new Map<string, number[]>();
+
+function isRateLimited(ip: string): boolean {
+  const now = Date.now();
+  const timestamps = registerFailures.get(ip) ?? [];
+  const recent = timestamps.filter((t) => now - t < REGISTER_RATE_WINDOW_MS);
+  registerFailures.set(ip, recent);
+  return recent.length >= REGISTER_RATE_MAX_FAILURES;
+}
+
+function recordAuthFailure(ip: string): void {
+  const timestamps = registerFailures.get(ip) ?? [];
+  timestamps.push(Date.now());
+  registerFailures.set(ip, timestamps);
+  // Cap map size to prevent memory exhaustion from many unique IPs
+  if (registerFailures.size > 10_000) {
+    const oldest = registerFailures.keys().next().value;
+    if (oldest !== undefined) registerFailures.delete(oldest);
+  }
+}
+
 const healthServer = http.createServer((req, res) => {
   // POST /register — hot-register a new market without waiting for discovery cycle
   // Body: { slabAddress: string, mainnetCA?: string }
@@ -131,12 +157,22 @@ const healthServer = http.createServer((req, res) => {
       res.end(JSON.stringify({ success: false, message: "Endpoint not configured" }));
       return;
     }
+
+    const clientIp = String(req.socket.remoteAddress ?? "unknown");
+    if (isRateLimited(clientIp)) {
+      logger.warn("Register rate limited", { ip: clientIp });
+      res.writeHead(429, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ success: false, message: "Too many requests" }));
+      return;
+    }
+
     const provided = String(req.headers["x-shared-secret"] ?? "");
     const secretBuf = Buffer.from(registerSecret, "utf8");
     const providedBuf = Buffer.from(provided, "utf8");
     const lengthMatch = secretBuf.length === providedBuf.length;
     const safeBuf = lengthMatch ? providedBuf : secretBuf;
     if (!lengthMatch || !timingSafeEqual(secretBuf, safeBuf)) {
+      recordAuthFailure(clientIp);
       res.writeHead(401, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ success: false, message: "Unauthorized" }));
       return;
