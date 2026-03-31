@@ -29,4 +29,39 @@ describe("validateKeeperEnvGuards", () => {
 
     expect(() => validateKeeperEnvGuards(env)).not.toThrow();
   });
+
+  it("throws when SOLANA_RPC_URL uses http://", () => {
+    const env = {
+      SOLANA_RPC_URL: "http://api.mainnet-beta.solana.com",
+    } as NodeJS.ProcessEnv;
+
+    expect(() => validateKeeperEnvGuards(env)).toThrow("must use https://");
+  });
+
+  it("throws when SOLANA_RPC_WS_URL uses ws://", () => {
+    const env = {
+      SOLANA_RPC_WS_URL: "ws://api.mainnet-beta.solana.com",
+    } as NodeJS.ProcessEnv;
+
+    expect(() => validateKeeperEnvGuards(env)).toThrow("must use wss://");
+  });
+
+  it("allows insecure URLs when ALLOW_INSECURE_RPC=true", () => {
+    const env = {
+      SOLANA_RPC_URL: "http://localhost:8899",
+      SOLANA_RPC_WS_URL: "ws://localhost:8900",
+      ALLOW_INSECURE_RPC: "true",
+    } as NodeJS.ProcessEnv;
+
+    expect(() => validateKeeperEnvGuards(env)).not.toThrow();
+  });
+
+  it("does not throw for https:// and wss:// URLs", () => {
+    const env = {
+      SOLANA_RPC_URL: "https://api.mainnet-beta.solana.com",
+      SOLANA_RPC_WS_URL: "wss://api.mainnet-beta.solana.com",
+    } as NodeJS.ProcessEnv;
+
+    expect(() => validateKeeperEnvGuards(env)).not.toThrow();
+  });
 });
