@@ -321,8 +321,16 @@ start().catch((err) => {
   logger.info("Keeper will stay alive for healthcheck despite startup error");
 });
 
+const SHUTDOWN_TIMEOUT_MS = 15_000;
+
 async function shutdown(signal: string): Promise<void> {
   logger.info("Shutdown initiated", { signal });
+
+  const forceExit = setTimeout(() => {
+    logger.error("Shutdown timed out — forcing exit", { timeoutMs: SHUTDOWN_TIMEOUT_MS });
+    process.exit(1);
+  }, SHUTDOWN_TIMEOUT_MS);
+  forceExit.unref();
   
   try {
     // Send shutdown alert
