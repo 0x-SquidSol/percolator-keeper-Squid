@@ -510,7 +510,8 @@ export class LiquidationService {
 
     // P2 FIX: Periodically clear permanentlySkipped to allow recovery when SDK is updated.
     // Markets re-add themselves on next parse failure, so this is safe.
-    if (this.permanentlySkipped.size > 0 && this.scanCount % 10 === 0) {
+    // Note: scanCount=0 on first call, so use scanCount > 0 to avoid clearing on initial run.
+    if (this.permanentlySkipped.size > 0 && this.scanCount > 0 && this.scanCount % 10 === 0) {
       logger.debug("Clearing permanentlySkipped set for retry", {
         count: this.permanentlySkipped.size,
         markets: Array.from(this.permanentlySkipped).slice(0, 5),
