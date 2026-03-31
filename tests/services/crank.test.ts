@@ -45,7 +45,11 @@ vi.mock('@percolator/shared', () => ({
     getProgramAccounts: vi.fn(),
   })),
   loadKeypair: vi.fn(() => ({
-    publicKey: { toBase58: () => '11111111111111111111111111111111', equals: () => true },
+    publicKey: {
+      toBase58: () => '11111111111111111111111111111111',
+      // Use string-based equality so foreign oracle authorities correctly return false.
+      equals: (other: any) => other?.toBase58?.() === '11111111111111111111111111111111',
+    },
     secretKey: new Uint8Array(64),
   })),
   sendWithRetry: vi.fn(async () => 'mock-signature-' + Date.now()),
@@ -706,6 +710,7 @@ describe('CrankService', () => {
       const ZERO_BYTES = new Uint8Array(32); // all zeros
       const KEEPER_PUBKEY_STR = '11111111111111111111111111111112'; // valid base58 non-default
 
+      // Set the mock BEFORE creating CrankService so _keypair cache picks up this key.
       vi.mocked(shared.loadKeypair).mockReturnValue({
         publicKey: {
           toBase58: () => KEEPER_PUBKEY_STR,
@@ -713,6 +718,9 @@ describe('CrankService', () => {
         },
         secretKey: new Uint8Array(64),
       } as any);
+
+      // Create a fresh CrankService AFTER the mock is set so _keypair is KEEPER_PUBKEY_STR.
+      const localCrank = new CrankService(mockOracleService);
 
       // Mock oracleAuthority that matches keeper key
       const keeperOracleAuth = {
@@ -760,9 +768,9 @@ describe('CrankService', () => {
       // fetchPrice returns null (no DEX data for either market)
       mockOracleService.fetchPrice = vi.fn().mockResolvedValue(null);
 
-      await crankService.discover();
+      await localCrank.discover();
 
-      const result = await crankService.crankAll();
+      const result = await localCrank.crankAll();
 
       // Hyperp no-price market → skipped (not failed)
       expect(result.failed).toBe(0);
@@ -770,8 +778,9 @@ describe('CrankService', () => {
       expect(result.success).toBeGreaterThanOrEqual(1);
 
       // Flag should be set on hyperp zero-price market
-      const hyperpState = crankService.getMarkets().get(slabHyperp)!;
+      const hyperpState = localCrank.getMarkets().get(slabHyperp)!;
       expect(hyperpState.hyperpNoPriceSkipped).toBe(true);
+      localCrank.stop();
     });
 
     it('PERC-1254: should crank Hyperp market once fetchPrice returns a valid price', async () => {
@@ -789,6 +798,7 @@ describe('CrankService', () => {
         },
       };
 
+      // Set mock BEFORE constructing the local service so _keypair cache picks it up.
       vi.mocked(shared.loadKeypair).mockReturnValue({
         publicKey: {
           toBase58: () => KEEPER_PUBKEY_STR2,
@@ -796,6 +806,9 @@ describe('CrankService', () => {
         },
         secretKey: new Uint8Array(64),
       } as any);
+
+      // Fresh CrankService so _keypair is KEEPER_PUBKEY_STR2.
+      const localCrank = new CrankService(mockOracleService);
 
       const hyperpMarket = {
         slabAddress: { toBase58: () => slabHyperp, equals: (o: any) => false },
@@ -815,10 +828,10 @@ describe('CrankService', () => {
 
       // First cycle: no price
       mockOracleService.fetchPrice = vi.fn().mockResolvedValue(null);
-      await crankService.discover();
-      const result1 = await crankService.crankAll();
+      await localCrank.discover();
+      const result1 = await localCrank.crankAll();
       expect(result1.failed).toBe(0);
-      const stateAfterSkip = crankService.getMarkets().get(slabHyperp)!;
+      const stateAfterSkip = localCrank.getMarkets().get(slabHyperp)!;
       expect(stateAfterSkip.hyperpNoPriceSkipped).toBe(true);
 
       // Second cycle: price available — should clear flag and crank
@@ -826,10 +839,11 @@ describe('CrankService', () => {
       // Simulate discovery reset (as discover() does)
       stateAfterSkip.hyperpNoPriceSkipped = false;
 
-      const result2 = await crankService.crankMarket(slabHyperp);
+      const result2 = await localCrank.crankMarket(slabHyperp);
       expect(result2).toBe(true);
-      const stateAfterCrank = crankService.getMarkets().get(slabHyperp)!;
+      const stateAfterCrank = localCrank.getMarkets().get(slabHyperp)!;
       expect(stateAfterCrank.hyperpNoPriceSkipped).toBeFalsy();
+      localCrank.stop();
     });
 
     it('PERC-1254: should reset hyperpNoPriceSkipped flag on rediscovery', async () => {
