@@ -113,6 +113,7 @@ export class CrankService {
   private readonly signatureTTLMs = 60_000; // 60 seconds
   private _isRunning = false;
   private _cycling = false;
+  private _cycleStartedAt = 0;
   private _stalePauseCheck?: (slabAddress: string) => boolean;
   // P1 FIX: Cache keypair at construction — was reading from disk on every crank cycle (every 30s)
   private readonly _keypair = loadKeypair(process.env.CRANK_KEYPAIR!);
@@ -841,9 +842,26 @@ export class CrankService {
       });
     }
 
+    const MAX_CYCLE_MS = this.intervalMs * 10;
+
     this.timer = setInterval(async () => {
-      if (this._cycling) return; // Prevent overlapping cycles
+      if (this._cycling) {
+        const elapsed = Date.now() - this._cycleStartedAt;
+        if (elapsed > MAX_CYCLE_MS) {
+          logger.error("Crank cycle watchdog: cycle exceeded max duration, force-resetting", {
+            elapsedMs: elapsed,
+            maxCycleMs: MAX_CYCLE_MS,
+          });
+          sendCriticalAlert("Crank cycle hung — watchdog reset", [
+            { name: "Elapsed", value: `${Math.round(elapsed / 1000)}s`, inline: true },
+            { name: "Max", value: `${Math.round(MAX_CYCLE_MS / 1000)}s`, inline: true },
+          ])?.catch(() => {});
+          this._cycling = false;
+        }
+        return;
+      }
       this._cycling = true;
+      this._cycleStartedAt = Date.now();
       try {
         // Only rediscover periodically (default 5min) to avoid RPC rate limits
         // PERC-8235: Don't use markets.size===0 as a trigger to rediscover every tick.

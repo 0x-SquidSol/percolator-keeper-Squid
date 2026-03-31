@@ -141,6 +141,7 @@ export class LiquidationService {
   private lastScanTime = 0;
   // Overlap guard: prevent concurrent scan cycles from interleaving
   private _scanning = false;
+  private _scanStartedAt = 0;
   // BC1: Signature replay protection
   private recentSignatures = new Map<string, number>(); // signature -> timestamp
   private readonly signatureTTLMs = 60_000; // 60 seconds
@@ -572,10 +573,22 @@ export class LiquidationService {
     if (this.timer) return;
     logger.info("Liquidation service starting", { intervalMs: this.intervalMs });
 
+    const MAX_SCAN_MS = this.intervalMs * 5;
+
     const runCycle = async () => {
-      // Overlap guard: skip if previous cycle is still running
-      if (this._scanning) return;
+      if (this._scanning) {
+        const elapsed = Date.now() - this._scanStartedAt;
+        if (elapsed > MAX_SCAN_MS) {
+          logger.error("Liquidation scan watchdog: cycle exceeded max duration, force-resetting", {
+            elapsedMs: elapsed,
+            maxScanMs: MAX_SCAN_MS,
+          });
+          this._scanning = false;
+        }
+        return;
+      }
       this._scanning = true;
+      this._scanStartedAt = Date.now();
       try {
         const marketsSnapshot = new Map(getMarkets());
         const result = await this.scanAndLiquidateAll(marketsSnapshot);
