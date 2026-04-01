@@ -400,6 +400,16 @@ export class OracleService {
    * was more than `thresholdMs` ago (or never pushed).
    * Only considers markets that have at least one price history entry.
    */
+  /**
+   * Record a successful price push for a market. Called by CrankService when
+   * a price push is bundled into a crank transaction (bypassing pushPrice()).
+   * Without this, getStaleMarkets() would flag bundled-push markets as stale
+   * because lastPushTime is never updated.
+   */
+  recordPushTime(slabAddress: string): void {
+    this.lastPushTime.set(slabAddress, Date.now());
+  }
+
   getStaleMarkets(thresholdMs: number): string[] {
     const now = Date.now();
     const stale: string[] = [];
