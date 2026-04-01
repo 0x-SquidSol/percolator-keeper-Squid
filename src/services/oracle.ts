@@ -6,7 +6,7 @@ import {
   ACCOUNTS_PUSH_ORACLE_PRICE,
   type MarketConfig,
 } from "@percolator/sdk";
-import { config, getConnection, loadKeypair, sendWithRetry, eventBus, createLogger, getErrorMessage } from "@percolator/shared";
+import { config, getConnection, loadKeypair, sendWithRetry, eventBus, createLogger, getErrorMessage, sendWarningAlert } from "@percolator/shared";
 
 const logger = createLogger("keeper:oracle");
 
@@ -55,6 +55,10 @@ export class OracleService {
   private readonly maxTrackedMarkets = 500;
   // BM2: Deduplicate concurrent requests for the same mint
   private inFlightRequests = new Map<string, Promise<bigint | null>>();
+  // Track consecutive single-source fetches to detect degraded cross-validation
+  private _consecutiveSingleSource = 0;
+  private _singleSourceAlertSent = false;
+  private static readonly SINGLE_SOURCE_ALERT_THRESHOLD = 10;
 
   /** Fetch price from DexScreener (with rate-limit cache) */
   async fetchDexScreenerPrice(mint: string): Promise<bigint | null> {
@@ -188,6 +192,38 @@ export class OracleService {
           jupPrice: jupPrice.toString()
         });
         return null;
+      }
+    }
+
+    // Track cross-validation coverage: alert when single-source mode persists
+    const bothAvailable = dexPrice !== null && jupPrice !== null;
+    if (bothAvailable) {
+      if (this._consecutiveSingleSource > 0) {
+        logger.info("Cross-source validation restored", {
+          previousSingleSourceCount: this._consecutiveSingleSource,
+        });
+      }
+      this._consecutiveSingleSource = 0;
+      this._singleSourceAlertSent = false;
+    } else if (dexPrice !== null || jupPrice !== null) {
+      this._consecutiveSingleSource++;
+      const degradedSource = dexPrice !== null ? "dexscreener" : "jupiter";
+      const downSource = dexPrice !== null ? "jupiter" : "dexscreener";
+      if (
+        this._consecutiveSingleSource >= OracleService.SINGLE_SOURCE_ALERT_THRESHOLD &&
+        !this._singleSourceAlertSent
+      ) {
+        this._singleSourceAlertSent = true;
+        logger.warn("Cross-source validation degraded — operating on single source", {
+          consecutiveSingleSource: this._consecutiveSingleSource,
+          activeSource: degradedSource,
+          downSource,
+        });
+        sendWarningAlert("Oracle cross-validation degraded", [
+          { name: "Active Source", value: degradedSource, inline: true },
+          { name: "Down Source", value: downSource, inline: true },
+          { name: "Consecutive", value: String(this._consecutiveSingleSource), inline: true },
+        ])?.catch(() => {});
       }
     }
 
