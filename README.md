@@ -56,11 +56,14 @@ docker run --env-file .env percolator-keeper
 |----------|----------|-------------|
 | `SOLANA_RPC_URL` | ✅ | Solana RPC endpoint |
 | `SOLANA_RPC_WS_URL` | ✅ | Solana WebSocket RPC endpoint |
-| `KEEPER_PRIVATE_KEY` | ✅ | Keeper wallet private key (base58) |
+| `CRANK_KEYPAIR` | ✅ | Keeper wallet private key (base58) or path to keypair JSON |
 | `SUPABASE_URL` | ✅ | Supabase project URL |
-| `SUPABASE_SERVICE_KEY` | ✅ | Supabase service role key |
+| `SUPABASE_KEY` | ✅ | Supabase anon key (for keeper runtime) |
+| `SUPABASE_SERVICE_ROLE_KEY` | ✅ | Supabase service role key (must differ from `SUPABASE_KEY`) |
 | `SENTRY_DSN` | ❌ | Sentry error tracking DSN |
 | `KEEPER_HEALTH_PORT` | ❌ | Health check port (default: 8081) |
+| `KEEPER_REGISTER_SECRET` | ❌ | Shared secret for `/register` endpoint |
+| `ADL_ENABLED` | ❌ | Set to `true` to enable ADL service |
 
 ## License
 
