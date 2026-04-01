@@ -294,6 +294,28 @@ healthServer.listen(healthPort, () => {
 const STARTUP_DISCOVERY_DELAYS_MS = [5_000, 15_000, 30_000, 60_000];
 
 async function start() {
+  // Validate RPC connectivity before attempting discovery — fail fast on misconfiguration
+  try {
+    const { getConnection, getFallbackConnection } = await import("@percolator/shared");
+    const primary = getConnection();
+    const slot = await primary.getSlot();
+    logger.info("Primary RPC connectivity verified", { slot });
+
+    try {
+      const fallback = getFallbackConnection();
+      const fbSlot = await fallback.getSlot();
+      logger.info("Fallback RPC connectivity verified", { slot: fbSlot });
+    } catch (fbErr) {
+      logger.warn("Fallback RPC unreachable — keeper will rely on primary only", {
+        error: fbErr instanceof Error ? fbErr.message : String(fbErr),
+      });
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error("Primary RPC unreachable at startup — check SOLANA_RPC_URL", { error: msg });
+    throw new Error(`Primary RPC connectivity check failed: ${msg}`);
+  }
+
   let markets: Awaited<ReturnType<typeof crankService.discover>> = [];
   let discoverySuccess = false;
 
