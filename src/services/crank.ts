@@ -217,10 +217,21 @@ export class CrankService {
         logger.warn("Supabase market metadata query error", { error: error.message });
       }
       if (data) {
+        const base58Re = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
         for (const row of data) {
+          const pool = row.dex_pool_address ?? undefined;
+          const ca = row.mainnet_ca ?? undefined;
+          if (pool && !base58Re.test(pool)) {
+            logger.warn("Invalid dex_pool_address from Supabase, ignoring", { slabAddress: row.slab_address, dexPoolAddress: pool });
+            continue;
+          }
+          if (ca && !base58Re.test(ca)) {
+            logger.warn("Invalid mainnet_ca from Supabase, ignoring", { slabAddress: row.slab_address, mainnetCA: ca });
+            continue;
+          }
           dbMarkets.set(row.slab_address, {
-            dexPoolAddress: row.dex_pool_address ?? undefined,
-            mainnetCA: row.mainnet_ca ?? undefined,
+            dexPoolAddress: pool,
+            mainnetCA: ca,
           });
         }
       }
@@ -785,6 +796,15 @@ export class CrankService {
 
     const data = new Uint8Array(info.data);
     const programId = info.owner;
+
+    // Validate account owner is a known Percolator program — reject unknown programs
+    // to prevent the keeper from sending signed transactions to arbitrary programs.
+    const knownIds = new Set(config.allProgramIds);
+    if (!knownIds.has(programId.toBase58())) {
+      const msg = `Slab account owned by unknown program ${programId.toBase58()} — expected one of [${config.allProgramIds.join(", ")}]`;
+      logger.warn(msg, { slabAddress });
+      return { success: false, message: msg };
+    }
 
     try {
       const header = parseHeader(data);
