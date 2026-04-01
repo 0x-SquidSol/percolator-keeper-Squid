@@ -9,14 +9,15 @@
  *   3. Admin-oracle / pumpswap price computation (GH#1376 regression)
  *   4. HYPERP vs Pyth end-to-end scenario table
  *
- * Key implementation detail discovered via testing:
- *   The divergence check uses BigInt integer division:
- *     divergencePct = Number((larger - smaller) * 100n / smaller)
- *   This TRUNCATES, so:
- *     10.00% divergence → integer 10 → NOT > 10 → ACCEPTED
- *     10.0001% divergence → integer 10 → NOT > 10 → ACCEPTED
- *     11.00% divergence → integer 11 → IS > 10 → REJECTED
- *   Effective rejection threshold is >10 integer ≈ ≥11% actual.
+ * Key implementation detail:
+ *   The divergence check uses basis-point precision (10_000n multiplier)
+ *   to avoid integer truncation:
+ *     divergenceBps = Number((larger - smaller) * 10_000n / smaller)
+ *   So:
+ *     10.00% divergence → 1000 bps → NOT > 1000 → ACCEPTED
+ *     10.01% divergence → 1001 bps → IS > 1000 → REJECTED
+ *     11.00% divergence → 1100 bps → IS > 1000 → REJECTED
+ *   Effective rejection threshold is >10.00%.
  *
  * All tests use mocked fetch — no live network required.
  */
@@ -89,9 +90,8 @@ function toE6(usd: number): bigint {
 
 // ─── 1. Cross-source deviation boundary tests ─────────────────────────────────
 //
-// IMPORTANT: implementation uses integer BigInt division for divergencePct.
-// Effective rejection point is integer divergence > 10, which requires ≥11% actual.
-// 10.0–10.99% divergence → truncates to 10 → ACCEPTED (implementation quirk, documented here).
+// Deviation is computed in basis points (10_000n multiplier) for precise comparison.
+// Effective rejection point: divergenceBps > 1000 (i.e. >10.00%).
 
 describe('Cross-source deviation — actual boundary conditions', () => {
   let svc: OracleService;
@@ -117,16 +117,21 @@ describe('Cross-source deviation — actual boundary conditions', () => {
     expect(r!.source).toBe('dexscreener');
   });
 
-  it('10% divergence — ACCEPTED (BigInt truncation: 10 is not > 10)', async () => {
-    // dex=1_000_000 jup=1_100_000 → divergence = 100_000*100/1_000_000 = 10 → NOT > 10
+  it('10% divergence — ACCEPTED (exactly 1000 bps, not > 1000)', async () => {
     const mint = freshMint();
     mockBothSources(1.00, 1.10, mint);
     const r = await svc.fetchPrice(mint, freshSlab());
-    expect(r).not.toBeNull(); // accepted — documents implementation behaviour
+    expect(r).not.toBeNull();
   });
 
-  it('11% divergence — REJECTED (integer 11 > 10)', async () => {
-    // dex=1_000_000 jup=1_110_000 → divergence=11 → rejected
+  it('10.5% divergence — REJECTED (1050 bps > 1000)', async () => {
+    const mint = freshMint();
+    mockBothSources(1.00, 1.105, mint);
+    const r = await svc.fetchPrice(mint, freshSlab());
+    expect(r).toBeNull();
+  });
+
+  it('11% divergence — REJECTED (1100 bps > 1000)', async () => {
     const mint = freshMint();
     mockBothSources(1.00, 1.11, mint);
     const r = await svc.fetchPrice(mint, freshSlab());
@@ -229,13 +234,13 @@ describe('Historical deviation — boundary conditions', () => {
     expect(r!.priceE6).toBe(toE6(1.29));
   });
 
-  it('30% increase — ACCEPTED (threshold is deviation > 30, integer division)', async () => {
+  it('30% increase — ACCEPTED (exactly 3000 bps, not > 3000)', async () => {
     const slab = freshSlab();
     await seedPrice(slab, 1.00);
     const mint = freshMint();
     mockBothSources(1.30, 1.30, mint);
     const r = await svc.fetchPrice(mint, slab);
-    expect(r).not.toBeNull(); // exactly 30 is not > 30
+    expect(r).not.toBeNull();
   });
 
   it('31% increase — REJECTED', async () => {
@@ -367,10 +372,10 @@ describe('Admin-oracle pumpswap price computation — GH#1376 regression', () =>
 
     const larger = buggyE6 > jupiterE6 ? buggyE6 : jupiterE6;
     const smaller = buggyE6 > jupiterE6 ? jupiterE6 : buggyE6;
-    const divergencePct = Number((larger - smaller) * 100n / smaller);
+    const divergenceBps = Number((larger - smaller) * 10_000n / smaller);
 
-    // Way over 10 — cross-source check would block this
-    expect(divergencePct).toBeGreaterThan(10);
+    // Way over 1000 bps — cross-source check would block this
+    expect(divergenceBps).toBeGreaterThan(1000);
   });
 
   it('price sanitizer alone does NOT catch the raw-reserve bug (documents gap)', () => {
@@ -428,7 +433,7 @@ describe('HYPERP vs Pyth scenario table', () => {
    *   Jupiter     = secondary reference (similar to Pyth index)
    *
    * These scenarios simulate realistic market conditions.
-   * Threshold: integer divergence > 10 (≈≥11% actual due to BigInt truncation).
+   * Threshold: divergenceBps > 1000 (>10.00%).
    */
   let svc: OracleService;
 
@@ -447,8 +452,8 @@ describe('HYPERP vs Pyth scenario table', () => {
     { label: 'normal — both $150, 0% dev',          hyperp: 150.00,  pyth: 150.00, expectAccepted: true,  note: 'baseline' },
     { label: 'slight HYPERP premium, 5%',            hyperp: 157.50,  pyth: 150.00, expectAccepted: true,  note: 'normal spread' },
     { label: 'HYPERP at 9% premium',                 hyperp: 163.50,  pyth: 150.00, expectAccepted: true,  note: 'high but within limit' },
-    { label: 'HYPERP at 10% premium (integer 10)',   hyperp: 165.00,  pyth: 150.00, expectAccepted: true,  note: 'exactly 10 — ACCEPTED (not > 10)' },
-    { label: 'HYPERP at 11% premium (integer 11)',   hyperp: 166.50,  pyth: 150.00, expectAccepted: false, note: 'rejected' },
+    { label: 'HYPERP at 10% premium (1000 bps)',      hyperp: 165.00,  pyth: 150.00, expectAccepted: true,  note: 'exactly 1000 bps — ACCEPTED (not > 1000)' },
+    { label: 'HYPERP at 11% premium (1100 bps)',      hyperp: 166.50,  pyth: 150.00, expectAccepted: false, note: 'rejected' },
     { label: 'HYPERP at 15% premium',                hyperp: 172.50,  pyth: 150.00, expectAccepted: false, note: 'volatile pump' },
     { label: 'HYPERP at 20% discount',               hyperp: 120.00,  pyth: 150.00, expectAccepted: false, note: 'cascading sell' },
     { label: 'HYPERP at 50% discount (circuit break)',hyperp:  75.00, pyth: 150.00, expectAccepted: false, note: 'extreme crash' },
