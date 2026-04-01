@@ -68,6 +68,7 @@ describe('OracleService', () => {
       };
 
       vi.mocked(fetch).mockResolvedValueOnce({
+        ok: true,
         json: async () => mockResponse,
       } as any);
 
@@ -99,6 +100,7 @@ describe('OracleService', () => {
       };
 
       vi.mocked(fetch).mockResolvedValueOnce({
+        ok: true,
         json: async () => mockResponse,
       } as any);
 
@@ -136,7 +138,7 @@ describe('OracleService', () => {
       let callCount = 0;
       vi.mocked(fetch).mockImplementation(async () => {
         callCount++;
-        return { json: async () => mockResponse } as any;
+        return { ok: true, json: async () => mockResponse } as any;
       });
 
       // First call - should fetch
@@ -161,9 +163,9 @@ describe('OracleService', () => {
       vi.mocked(fetch).mockImplementation(async () => {
         callCount++;
         if (callCount === 1) {
-          return { json: async () => mockResponse1 } as any;
+          return { ok: true, json: async () => mockResponse1 } as any;
         }
-        return { json: async () => mockResponse2 } as any;
+        return { ok: true, json: async () => mockResponse2 } as any;
       });
 
       // First call
@@ -190,6 +192,7 @@ describe('OracleService', () => {
       };
 
       vi.mocked(fetch).mockResolvedValueOnce({
+        ok: true,
         json: async () => mockResponse,
       } as any);
 
@@ -226,8 +229,8 @@ describe('OracleService', () => {
       };
 
       vi.mocked(fetch)
-        .mockResolvedValueOnce({ json: async () => dexResponse } as any)
-        .mockResolvedValueOnce({ json: async () => jupResponse } as any);
+        .mockResolvedValueOnce({ ok: true, json: async () => dexResponse } as any)
+        .mockResolvedValueOnce({ ok: true, json: async () => jupResponse } as any);
 
       const priceEntry = await oracleService.fetchPrice('MINT999', 'SLAB999');
 
@@ -248,8 +251,8 @@ describe('OracleService', () => {
       };
 
       vi.mocked(fetch)
-        .mockResolvedValueOnce({ json: async () => dexResponse } as any)
-        .mockResolvedValueOnce({ json: async () => jupResponse } as any);
+        .mockResolvedValueOnce({ ok: true, json: async () => dexResponse } as any)
+        .mockResolvedValueOnce({ ok: true, json: async () => jupResponse } as any);
 
       const priceEntry = await oracleService.fetchPrice('MINT888', 'SLAB888');
 
@@ -263,10 +266,10 @@ describe('OracleService', () => {
       // Seed history with $1.00 for SLAB_HISTDEV
       vi.mocked(fetch)
         .mockResolvedValueOnce({
-          json: async () => ({ pairs: [{ priceUsd: '1.00', liquidity: { usd: 100000 } }] }),
+          ok: true, json: async () => ({ pairs: [{ priceUsd: '1.00', liquidity: { usd: 100000 } }] }),
         } as any)
         .mockResolvedValueOnce({
-          json: async () => ({ data: { MINT_HISTDEV_A: { price: '1.00' } } }),
+          ok: true, json: async () => ({ data: { MINT_HISTDEV_A: { price: '1.00' } } }),
         } as any);
 
       const price1 = await oracleService.fetchPrice('MINT_HISTDEV_A', 'SLAB_HISTDEV');
@@ -278,10 +281,10 @@ describe('OracleService', () => {
       // but fails the >30% historical deviation check.
       vi.mocked(fetch)
         .mockResolvedValueOnce({
-          json: async () => ({ pairs: [{ priceUsd: '1.50', liquidity: { usd: 100000 } }] }),
+          ok: true, json: async () => ({ pairs: [{ priceUsd: '1.50', liquidity: { usd: 100000 } }] }),
         } as any)
         .mockResolvedValueOnce({
-          json: async () => ({ data: { MINT_HISTDEV_B: { price: '1.50' } } }),
+          ok: true, json: async () => ({ data: { MINT_HISTDEV_B: { price: '1.50' } } }),
         } as any);
 
       const price2 = await oracleService.fetchPrice('MINT_HISTDEV_B', 'SLAB_HISTDEV');
@@ -292,10 +295,10 @@ describe('OracleService', () => {
       // Seed history with $1.00 for SLAB_HISTDEV2
       vi.mocked(fetch)
         .mockResolvedValueOnce({
-          json: async () => ({ pairs: [{ priceUsd: '1.00', liquidity: { usd: 100000 } }] }),
+          ok: true, json: async () => ({ pairs: [{ priceUsd: '1.00', liquidity: { usd: 100000 } }] }),
         } as any)
         .mockResolvedValueOnce({
-          json: async () => ({ data: { MINT_HISTDEV2_A: { price: '1.00' } } }),
+          ok: true, json: async () => ({ data: { MINT_HISTDEV2_A: { price: '1.00' } } }),
         } as any);
 
       const price1 = await oracleService.fetchPrice('MINT_HISTDEV2_A', 'SLAB_HISTDEV2');
@@ -304,10 +307,10 @@ describe('OracleService', () => {
       // New price = $1.20 (20% above history) — within 30% threshold → accepted
       vi.mocked(fetch)
         .mockResolvedValueOnce({
-          json: async () => ({ pairs: [{ priceUsd: '1.20', liquidity: { usd: 100000 } }] }),
+          ok: true, json: async () => ({ pairs: [{ priceUsd: '1.20', liquidity: { usd: 100000 } }] }),
         } as any)
         .mockResolvedValueOnce({
-          json: async () => ({ data: { MINT_HISTDEV2_B: { price: '1.20' } } }),
+          ok: true, json: async () => ({ data: { MINT_HISTDEV2_B: { price: '1.20' } } }),
         } as any);
 
       const price2 = await oracleService.fetchPrice('MINT_HISTDEV2_B', 'SLAB_HISTDEV2');
@@ -319,10 +322,10 @@ describe('OracleService', () => {
       // First call for a brand-new slab → no history → no deviation check → accepted
       vi.mocked(fetch)
         .mockResolvedValueOnce({
-          json: async () => ({ pairs: [{ priceUsd: '9999.00', liquidity: { usd: 100000 } }] }),
+          ok: true, json: async () => ({ pairs: [{ priceUsd: '9999.00', liquidity: { usd: 100000 } }] }),
         } as any)
         .mockResolvedValueOnce({
-          json: async () => ({ data: { MINT_HISTDEV3: { price: '9999.00' } } }),
+          ok: true, json: async () => ({ data: { MINT_HISTDEV3: { price: '9999.00' } } }),
         } as any);
 
       const price = await oracleService.fetchPrice('MINT_HISTDEV3', 'SLAB_HISTDEV3_FRESH');
@@ -340,6 +343,7 @@ describe('OracleService', () => {
       };
 
       vi.mocked(fetch).mockResolvedValue({
+        ok: true,
         json: async () => ({
           pairs: [{ priceUsd: '1.00', liquidity: { usd: 100000 } }],
         }),
@@ -364,6 +368,7 @@ describe('OracleService', () => {
       };
 
       vi.mocked(fetch).mockResolvedValue({
+        ok: true,
         json: async () => ({
           pairs: [{ priceUsd: '1.00', liquidity: { usd: 100000 } }],
         }),
@@ -390,6 +395,7 @@ describe('OracleService', () => {
       };
 
       vi.mocked(fetch).mockResolvedValue({
+        ok: true,
         json: async () => mockResponse,
       } as any);
 
@@ -411,6 +417,7 @@ describe('OracleService', () => {
       };
 
       vi.mocked(fetch).mockResolvedValue({
+        ok: true,
         json: async () => mockResponse,
       } as any);
 
@@ -444,7 +451,7 @@ describe('OracleService', () => {
       vi.mocked(fetch).mockImplementation(async () => {
         fetchCount++;
         await new Promise(resolve => setTimeout(resolve, 100));
-        return { json: async () => mockResponse } as any;
+        return { ok: true, json: async () => mockResponse } as any;
       });
 
       // Make concurrent requests
@@ -473,7 +480,7 @@ describe('OracleService', () => {
       vi.mocked(fetch).mockImplementation(async () => {
         fetchCount++;
         await new Promise(resolve => setTimeout(resolve, 100));
-        return { json: async () => mockResponse } as any;
+        return { ok: true, json: async () => mockResponse } as any;
       });
 
       // Make concurrent requests
@@ -501,6 +508,7 @@ describe('OracleService', () => {
       };
 
       vi.mocked(fetch).mockResolvedValue({
+        ok: true,
         json: async () => mockResponse,
       } as any);
 
