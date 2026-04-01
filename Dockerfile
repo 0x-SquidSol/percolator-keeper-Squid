@@ -43,8 +43,9 @@ USER node
 
 EXPOSE 8081
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+# Health check — start-period must exceed worst-case startup discovery
+# (4 retries × escalating delays = ~110s, plus inter-program spacing)
+HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=3 \
   CMD curl -f http://localhost:${KEEPER_HEALTH_PORT:-8081}/health || exit 1
 
 CMD ["node", "dist/index.js"]
