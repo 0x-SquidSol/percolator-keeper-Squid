@@ -167,6 +167,30 @@ function recordAuthFailure(ip: string): void {
   }
 }
 
+// Periodic cleanup: purge IPs whose failure timestamps have all expired.
+// Without this, the Map accumulates stale entries over long uptime.
+const RATE_LIMIT_CLEANUP_INTERVAL_MS = 5 * 60_000;
+const rateLimitCleanupTimer = setInterval(() => {
+  const now = Date.now();
+  for (const [ip, timestamps] of registerFailures.entries()) {
+    const recent = timestamps.filter((t) => now - t < REGISTER_RATE_WINDOW_MS);
+    if (recent.length === 0) {
+      registerFailures.delete(ip);
+    } else {
+      registerFailures.set(ip, recent);
+    }
+  }
+}, RATE_LIMIT_CLEANUP_INTERVAL_MS);
+rateLimitCleanupTimer.unref();
+
+// Shared security headers for all JSON responses — prevents MIME sniffing
+// and ensures intermediaries (CDN, reverse proxy) don't cache sensitive data.
+const secureJsonHeaders = {
+  "Content-Type": "application/json",
+  "X-Content-Type-Options": "nosniff",
+  "Cache-Control": "no-store",
+};
+
 const healthServer = http.createServer((req, res) => {
   // POST /register — hot-register a new market without waiting for discovery cycle
   // Body: { slabAddress: string, mainnetCA?: string }
@@ -174,9 +198,8 @@ const healthServer = http.createServer((req, res) => {
   if (req.url === "/register" && req.method === "POST") {
     const registerSecret = process.env.KEEPER_REGISTER_SECRET ?? "";
     if (!registerSecret) {
-      // Drain request body to prevent half-open TCP connections (GH#20 regression)
       req.resume();
-      res.writeHead(503, { "Content-Type": "application/json" });
+res.writeHead(503, secureJsonHeaders);
       res.end(JSON.stringify({ success: false, message: "Endpoint not configured" }));
       return;
     }
@@ -184,8 +207,8 @@ const healthServer = http.createServer((req, res) => {
     const clientIp = String(req.socket.remoteAddress ?? "unknown");
     if (isRateLimited(clientIp)) {
       logger.warn("Register rate limited", { ip: clientIp });
-      req.resume();
-      res.writeHead(429, { "Content-Type": "application/json" });
+req.resume();
+res.writeHead(429, secureJsonHeaders);
       res.end(JSON.stringify({ success: false, message: "Too many requests" }));
       return;
     }
@@ -204,8 +227,8 @@ const healthServer = http.createServer((req, res) => {
     const lengthMatch = secretBuf.length === providedBuf.length;
     if (!lengthMatch || !timingSafeEqual(secretPad, providedPad)) {
       recordAuthFailure(clientIp);
-      req.resume();
-      res.writeHead(401, { "Content-Type": "application/json" });
+req.resume();
+res.writeHead(401, secureJsonHeaders);
       res.end(JSON.stringify({ success: false, message: "Unauthorized" }));
       return;
     }
@@ -218,7 +241,7 @@ const healthServer = http.createServer((req, res) => {
       body += chunk.toString();
       if (Buffer.byteLength(body) > MAX_BODY_BYTES) {
         exceeded = true;
-        res.writeHead(413, { "Content-Type": "application/json" });
+        res.writeHead(413, secureJsonHeaders);
         res.end(JSON.stringify({ success: false, message: "Payload too large" }));
         req.destroy();
       }
@@ -229,19 +252,19 @@ const healthServer = http.createServer((req, res) => {
         const parsed = JSON.parse(body) as { slabAddress?: string; mainnetCA?: string };
         const { slabAddress, mainnetCA } = parsed;
         if (!slabAddress || typeof slabAddress !== "string") {
-          res.writeHead(400, { "Content-Type": "application/json" });
+          res.writeHead(400, secureJsonHeaders);
           res.end(JSON.stringify({ success: false, message: "slabAddress is required" }));
           return;
         }
         // Solana base58 addresses are 32–44 characters of [1-9A-HJ-NP-Za-km-z]
         const base58Re = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
         if (!base58Re.test(slabAddress)) {
-          res.writeHead(400, { "Content-Type": "application/json" });
+          res.writeHead(400, secureJsonHeaders);
           res.end(JSON.stringify({ success: false, message: "Invalid slabAddress format" }));
           return;
         }
         if (mainnetCA !== undefined && (typeof mainnetCA !== "string" || !base58Re.test(mainnetCA))) {
-          res.writeHead(400, { "Content-Type": "application/json" });
+          res.writeHead(400, secureJsonHeaders);
           res.end(JSON.stringify({ success: false, message: "Invalid mainnetCA format" }));
           return;
         }
@@ -252,11 +275,11 @@ const healthServer = http.createServer((req, res) => {
         const safeMessage = result.success
           ? result.message
           : "Registration failed";
-        res.writeHead(result.success ? 200 : 422, { "Content-Type": "application/json" });
+        res.writeHead(result.success ? 200 : 422, secureJsonHeaders);
         res.end(JSON.stringify({ success: result.success, message: safeMessage }));
       } catch (err) {
         logger.error("Register endpoint error", { error: err instanceof Error ? err.message : String(err) });
-        res.writeHead(500, { "Content-Type": "application/json" });
+        res.writeHead(500, secureJsonHeaders);
         res.end(JSON.stringify({ success: false, message: "Internal error" }));
       }
     });
@@ -265,7 +288,7 @@ const healthServer = http.createServer((req, res) => {
 
   // GET /pause-status — returns markets paused due to stale oracle
   if (req.url === "/pause-status" && req.method === "GET") {
-    res.writeHead(200, { "Content-Type": "application/json" });
+    res.writeHead(200, secureJsonHeaders);
     res.end(JSON.stringify({ pausedMarkets: [...stalePausedMarkets] }));
     return;
   }
@@ -363,7 +386,7 @@ const healthServer = http.createServer((req, res) => {
     };
     
     const statusCode = status === "down" ? 503 : 200; // "starting", "ok", "degraded" → 200
-    res.writeHead(statusCode, { "Content-Type": "application/json" });
+    res.writeHead(statusCode, secureJsonHeaders);
     res.end(JSON.stringify(healthData));
   } else {
     res.writeHead(404, { "Content-Type": "text/plain" });
