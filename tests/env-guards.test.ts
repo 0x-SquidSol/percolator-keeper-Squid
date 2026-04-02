@@ -64,4 +64,29 @@ describe("validateKeeperEnvGuards", () => {
 
     expect(() => validateKeeperEnvGuards(env)).not.toThrow();
   });
+
+  it("throws when FALLBACK_RPC_URL uses http://", () => {
+    const env = {
+      FALLBACK_RPC_URL: "http://api.devnet.solana.com",
+    } as NodeJS.ProcessEnv;
+
+    expect(() => validateKeeperEnvGuards(env)).toThrow("FALLBACK_RPC_URL must use https://");
+  });
+
+  it("allows insecure FALLBACK_RPC_URL when ALLOW_INSECURE_RPC=true", () => {
+    const env = {
+      FALLBACK_RPC_URL: "http://localhost:8899",
+      ALLOW_INSECURE_RPC: "true",
+    } as NodeJS.ProcessEnv;
+
+    expect(() => validateKeeperEnvGuards(env)).not.toThrow();
+  });
+
+  it("does not throw for https:// FALLBACK_RPC_URL", () => {
+    const env = {
+      FALLBACK_RPC_URL: "https://api.devnet.solana.com",
+    } as NodeJS.ProcessEnv;
+
+    expect(() => validateKeeperEnvGuards(env)).not.toThrow();
+  });
 });

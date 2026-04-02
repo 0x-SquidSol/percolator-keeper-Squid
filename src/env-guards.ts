@@ -30,5 +30,15 @@ export function validateKeeperEnvGuards(env: NodeJS.ProcessEnv = process.env): v
         "Set ALLOW_INSECURE_RPC=true to override for local development."
       );
     }
+    // Validate fallback RPC URL — used by discovery and liquidation retry.
+    // Same MITM risk as primary: signed transactions sent over plaintext.
+    const fallbackRpcUrl = env.FALLBACK_RPC_URL?.trim();
+    if (fallbackRpcUrl && !fallbackRpcUrl.startsWith("https://")) {
+      throw new Error(
+        `FALLBACK_RPC_URL must use https:// (got ${fallbackRpcUrl.slice(0, 30)}...). ` +
+        "Plaintext HTTP exposes signed transactions to MITM. " +
+        "Set ALLOW_INSECURE_RPC=true to override for local development."
+      );
+    }
   }
 }
