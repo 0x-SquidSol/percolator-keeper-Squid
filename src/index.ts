@@ -190,9 +190,16 @@ const healthServer = http.createServer((req, res) => {
     const provided = String(req.headers["x-shared-secret"] ?? "");
     const secretBuf = Buffer.from(registerSecret, "utf8");
     const providedBuf = Buffer.from(provided, "utf8");
+    // Pad both buffers to equal length so timingSafeEqual always runs in
+    // constant time regardless of input length — prevents attackers from
+    // binary-searching the secret length via response-time measurement.
+    const maxLen = Math.max(secretBuf.length, providedBuf.length, 1);
+    const secretPad = Buffer.alloc(maxLen);
+    const providedPad = Buffer.alloc(maxLen);
+    secretBuf.copy(secretPad);
+    providedBuf.copy(providedPad);
     const lengthMatch = secretBuf.length === providedBuf.length;
-    const safeBuf = lengthMatch ? providedBuf : secretBuf;
-    if (!lengthMatch || !timingSafeEqual(secretBuf, safeBuf)) {
+    if (!lengthMatch || !timingSafeEqual(secretPad, providedPad)) {
       recordAuthFailure(clientIp);
       res.writeHead(401, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ success: false, message: "Unauthorized" }));
