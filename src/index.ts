@@ -96,6 +96,27 @@ const staleCheckInterval = setInterval(() => {
   }
 }, 60_000);
 
+// GH#2025: Alert when liquidation scanner stalls (no scan completed for >3 min)
+const LIQUIDATION_STALE_THRESHOLD_MS = 3 * 60 * 1000;
+let _lastLiqStaleAlertTime = 0;
+const liqStaleCheckInterval = setInterval(() => {
+  if (Date.now() - _keeperStartTime < STARTUP_GRACE_MS) return;
+  const liqSt = liquidationService.getStatus();
+  if (!liqSt.running) return;
+  const timeSinceScan = liqSt.lastScanTime > 0 ? Date.now() - liqSt.lastScanTime : Infinity;
+  if (timeSinceScan > LIQUIDATION_STALE_THRESHOLD_MS) {
+    // Rate-limit alerts to once per 5 min
+    if (Date.now() - _lastLiqStaleAlertTime > 5 * 60 * 1000) {
+      _lastLiqStaleAlertTime = Date.now();
+      sendCriticalAlert("Liquidation scanner stalled", [
+        { name: "Time Since Last Scan", value: timeSinceScan === Infinity ? "never" : `${Math.round(timeSinceScan / 1000)}s`, inline: true },
+        { name: "Scan Count", value: liqSt.scanCount.toString(), inline: true },
+        { name: "Total Liquidations", value: liqSt.liquidationCount.toString(), inline: true },
+      ]).catch(() => {});
+    }
+  }
+}, 60_000);
+
 /** Check if a market is paused due to stale oracle */
 export function isMarketStalePaused(slabAddress: string): boolean {
   return stalePausedMarkets.has(slabAddress);
@@ -276,6 +297,17 @@ const healthServer = http.createServer((req, res) => {
     } else {
       status = "down";
     }
+
+    // GH#2025: Also degrade/down if liquidation scanner has stalled
+    const liqScanStatus = liquidationService.getStatus();
+    if (uptimeMs >= 300_000 && liqScanStatus.running) {
+      const timeSinceLiqScan = liqScanStatus.lastScanTime > 0 ? now - liqScanStatus.lastScanTime : Infinity;
+      if (timeSinceLiqScan > 300_000 && status !== "down") {
+        status = "down"; // Liquidation scan stalled >5 min
+      } else if (timeSinceLiqScan > 120_000 && status === "ok") {
+        status = "degraded"; // Liquidation scan stalled >2 min
+      }
+    }
     
     // ADL stats
     let adlStats: Record<string, unknown> | null = null;
@@ -292,6 +324,10 @@ const healthServer = http.createServer((req, res) => {
       adlStats = { enabled: false };
     }
 
+    // Liquidation scan health
+    const liqStatus = liquidationService.getStatus();
+    const timeSinceLastLiqScanMs = liqStatus.lastScanTime > 0 ? now - liqStatus.lastScanTime : null;
+
     const healthData = {
       status,
       lastCrankTime: mostRecentCrank,
@@ -299,6 +335,14 @@ const healthServer = http.createServer((req, res) => {
       marketsTracked,
       timeSinceLastCrankMs: timeSinceLastCrank === Infinity ? null : timeSinceLastCrank,
       timeSinceLastOracleMs: timeSinceLastOracle === Infinity ? null : timeSinceLastOracle,
+      liquidation: {
+        running: liqStatus.running,
+        scanCount: liqStatus.scanCount,
+        liquidationCount: liqStatus.liquidationCount,
+        lastScanTime: liqStatus.lastScanTime,
+        timeSinceLastScanMs: timeSinceLastLiqScanMs,
+        permanentlySkippedCount: liqStatus.permanentlySkippedCount,
+      },
       adl: adlStats,
       monitors: {
         rpc: monitors.rpc.getStatus(),
@@ -438,8 +482,9 @@ async function shutdown(signal: string): Promise<void> {
       { name: "Signal", value: signal, inline: true },
     ]);
     
-    // Stop stale oracle check
+    // Stop stale oracle + liquidation checks
     clearInterval(staleCheckInterval);
+    clearInterval(liqStaleCheckInterval);
 
     // Close health server
     logger.info("Closing health server");
