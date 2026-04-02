@@ -153,6 +153,8 @@ const healthServer = http.createServer((req, res) => {
   if (req.url === "/register" && req.method === "POST") {
     const registerSecret = process.env.KEEPER_REGISTER_SECRET ?? "";
     if (!registerSecret) {
+      // Drain request body to prevent half-open TCP connections (GH#20 regression)
+      req.resume();
       res.writeHead(503, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ success: false, message: "Endpoint not configured" }));
       return;
@@ -161,6 +163,7 @@ const healthServer = http.createServer((req, res) => {
     const clientIp = String(req.socket.remoteAddress ?? "unknown");
     if (isRateLimited(clientIp)) {
       logger.warn("Register rate limited", { ip: clientIp });
+      req.resume();
       res.writeHead(429, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ success: false, message: "Too many requests" }));
       return;
@@ -173,6 +176,7 @@ const healthServer = http.createServer((req, res) => {
     const safeBuf = lengthMatch ? providedBuf : secretBuf;
     if (!lengthMatch || !timingSafeEqual(secretBuf, safeBuf)) {
       recordAuthFailure(clientIp);
+      req.resume();
       res.writeHead(401, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ success: false, message: "Unauthorized" }));
       return;
