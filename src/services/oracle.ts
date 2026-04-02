@@ -32,6 +32,9 @@ const MIN_LIQUIDITY_USD = 1_000;
 // DexScreener rate limit: cache responses for 10s to avoid hitting limits
 const dexScreenerCache = new Map<string, { data: DexScreenerResponse; fetchedAt: number }>();
 const DEX_SCREENER_CACHE_TTL_MS = 10_000;
+// Cap cache size to prevent unbounded memory growth from accumulated mint entries.
+// 1000 entries ≈ worst-case ~2MB (each entry is a small JSON response).
+const DEX_SCREENER_CACHE_MAX_SIZE = 1_000;
 
 interface DexScreenerResponse {
   pairs?: Array<{ priceUsd?: string; liquidity?: { usd?: number } }>;
@@ -112,6 +115,11 @@ export class OracleService {
       const json = (await res.json()) as DexScreenerResponse;
       // BH7: Use captured timestamp for atomicity
       dexScreenerCache.set(mint, { data: json, fetchedAt: now });
+      // Evict oldest entry when cache exceeds size cap
+      if (dexScreenerCache.size > DEX_SCREENER_CACHE_MAX_SIZE) {
+        const oldestKey = dexScreenerCache.keys().next().value;
+        if (oldestKey !== undefined) dexScreenerCache.delete(oldestKey);
+      }
 
       const pair = sortPairsByLiquidity(json.pairs)?.[0];
       if (!pair?.priceUsd) return null;
