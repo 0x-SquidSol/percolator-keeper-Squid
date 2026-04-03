@@ -150,6 +150,46 @@ export class CrankService {
   }
 
   async discover(): Promise<DiscoveredMarket[]> {
+    // PERC-HOTFIX: If MARKETS_FILTER is set, skip expensive getProgramAccounts discovery.
+    // Instead, fetch each slab account directly via getAccountInfo (1 RPC call per market
+    // instead of ~8 getProgramAccounts calls that trigger 429 rate limits on Helius).
+    const marketsFilter = (process.env.MARKETS_FILTER ?? "").trim();
+    if (marketsFilter) {
+      const slabAddresses = marketsFilter.split(",").map(s => s.trim()).filter(Boolean);
+      logger.info("Using MARKETS_FILTER — skipping getProgramAccounts discovery", { count: slabAddresses.length });
+      const conn = getConnection();
+      const allFound: DiscoveredMarket[] = [];
+      for (const addr of slabAddresses) {
+        try {
+          const pubkey = new PublicKey(addr);
+          const info = await conn.getAccountInfo(pubkey);
+          if (!info?.data) {
+            logger.warn("MARKETS_FILTER: slab not found on-chain", { slab: addr.slice(0, 8) });
+            continue;
+          }
+          const data = new Uint8Array(info.data);
+          const { parseHeader, parseConfig, parseEngine, parseParams } = await import("@percolator/sdk");
+          const header = parseHeader(data);
+          const marketConfig = parseConfig(data);
+          const engine = parseEngine(data);
+          const params = parseParams(data);
+          allFound.push({
+            slabAddress: pubkey,
+            programId: info.owner,
+            header,
+            config: marketConfig,
+            engine,
+            params,
+          });
+        } catch (e) {
+          logger.warn("MARKETS_FILTER: failed to load slab", { slab: addr.slice(0, 8), error: e instanceof Error ? e.message : String(e) });
+        }
+      }
+      this.lastDiscoveryTime = Date.now();
+      logger.info("Market discovery complete (filtered)", { totalMarkets: allFound.length });
+      return allFound;
+    }
+
     const programIds = config.allProgramIds;
     logger.info("Discovering markets", { programCount: programIds.length });
     // Use fallback RPC for discovery (Helius rate-limits getProgramAccounts).
