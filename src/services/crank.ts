@@ -154,11 +154,11 @@ export class CrankService {
     // Instead, fetch each slab account directly via getAccountInfo (1 RPC call per market
     // instead of ~8 getProgramAccounts calls that trigger 429 rate limits on Helius).
     const marketsFilter = (process.env.MARKETS_FILTER ?? "").trim();
+    const allFound: DiscoveredMarket[] = [];
     if (marketsFilter) {
       const slabAddresses = marketsFilter.split(",").map(s => s.trim()).filter(Boolean);
       logger.info("Using MARKETS_FILTER — skipping getProgramAccounts discovery", { count: slabAddresses.length });
       const conn = getConnection();
-      const allFound: DiscoveredMarket[] = [];
       for (const addr of slabAddresses) {
         try {
           const pubkey = new PublicKey(addr);
@@ -185,19 +185,12 @@ export class CrankService {
           logger.warn("MARKETS_FILTER: failed to load slab", { slab: addr.slice(0, 8), error: e instanceof Error ? e.message : String(e) });
         }
       }
-      this.lastDiscoveryTime = Date.now();
-      logger.info("Market discovery complete (filtered)", { totalMarkets: allFound.length });
-      return allFound;
-    }
+      // Fall through to Supabase fetch + this.markets population below
+    } else {
 
     const programIds = config.allProgramIds;
     logger.info("Discovering markets", { programCount: programIds.length });
-    // Use fallback RPC for discovery (Helius rate-limits getProgramAccounts).
-    // PERC-1650: Program-level 429 retry backoff (outer loop) handles rate limit
-    // recovery. SDK fires tier queries in parallel; inter-program spacing (2s)
-    // prevents consecutive burst on multi-program configs.
     const discoveryConn = getFallbackConnection();
-    const allFound: DiscoveredMarket[] = [];
     for (let progIdx = 0; progIdx < programIds.length; progIdx++) {
       const id = programIds[progIdx];
       let found: DiscoveredMarket[] = [];
@@ -241,6 +234,7 @@ export class CrankService {
         await new Promise((r) => setTimeout(r, 3_000));
       }
     }
+    } // end else (normal discovery)
     const discovered = allFound;
     this.lastDiscoveryTime = Date.now();
     logger.info("Market discovery complete", { totalMarkets: discovered.length });
