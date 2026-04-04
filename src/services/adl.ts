@@ -520,8 +520,8 @@ export class AdlService {
 
     for (const [slabAddress, crankState] of markets) {
       // Skip permanently-skipped markets
-      if ((crankState as any).permanentlySkipped) continue;
-      if ((crankState as any).foreignOracleSkipped) continue;
+      if (crankState.permanentlySkipped) continue;
+      if (crankState.foreignOracleSkipped) continue;
 
       try {
         const sent = await this.scanMarket(slabAddress, crankState.market);
