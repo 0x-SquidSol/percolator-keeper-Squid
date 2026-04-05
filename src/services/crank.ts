@@ -408,12 +408,46 @@ export class CrankService {
         const instructions = [];
 
         // UpdateHyperpMark: accounts = [slab(writable), dex_pool, clock, ...remaining]
-        // The pool address must be stored in state.dexPoolAddress (from Supabase or config)
-        if (!state.dexPoolAddress) {
+        //
+        // PERC-SetDexPool security model:
+        //   1. PRIMARY: read dexPool from on-chain config (set by admin via SetDexPool).
+        //      An attacker who compromises Supabase service_role cannot override this.
+        //   2. FALLBACK: if on-chain dexPool is null (old slab / SetDexPool not yet called),
+        //      fall back to state.dexPoolAddress (from Supabase) with a migration warning.
+        //      The on-chain program will reject the UpdateHyperpMark with OracleInvalid anyway
+        //      until SetDexPool is called, so the fallback is only for the transition period.
+        //
+        // If both values exist but differ, log a security alert and use the on-chain value.
+        const onChainDexPool = state.market.config.dexPool;
+        let effectiveDexPoolAddress: string | undefined;
+
+        if (onChainDexPool) {
+          // SECURE PATH: on-chain pinned pool — use this exclusively
+          const onChainStr = onChainDexPool.toBase58();
+          if (state.dexPoolAddress && state.dexPoolAddress !== onChainStr) {
+            logger.warn("SECURITY: Supabase dex_pool_address differs from on-chain pinned dexPool — " +
+              "using on-chain value. If this is unexpected, admin must call SetDexPool to update.", {
+              slabAddress,
+              onChainDexPool: onChainStr,
+              supabaseDexPool: state.dexPoolAddress,
+            });
+          }
+          effectiveDexPoolAddress = onChainStr;
+        } else if (state.dexPoolAddress) {
+          // FALLBACK: on-chain dexPool not set yet (old slab or SetDexPool not called)
+          // The program will reject UpdateHyperpMark with OracleInvalid until admin calls SetDexPool.
+          logger.debug("HYPERP: using Supabase dex_pool_address (on-chain dexPool not set — admin must call SetDexPool)", {
+            slabAddress,
+            dexPoolAddress: state.dexPoolAddress,
+          });
+          effectiveDexPoolAddress = state.dexPoolAddress;
+        }
+
+        if (!effectiveDexPoolAddress) {
           if (!state.hyperpNoPriceSkipped) {
             state.hyperpNoPriceSkipped = true;
             logger.warn("HYPERP market has no dex_pool_address configured — skipping UpdateHyperpMark. " +
-              "Set dex_pool_address in Supabase markets table for this slab.", {
+              "Admin must call SetDexPool for this market.", {
               slabAddress,
             });
           }
@@ -422,7 +456,7 @@ export class CrankService {
           // Build UpdateHyperpMark instruction. If this fails, throw so KeeperCrank
           // is NOT sent with a stale oracle — avoids OracleInvalid (0xc) on-chain.
           const hyperpData = encodeUpdateHyperpMark();
-          const poolKey = new PublicKey(state.dexPoolAddress);
+          const poolKey = new PublicKey(effectiveDexPoolAddress);
 
           // Build accounts: [slab(writable), pool(readonly), clock(readonly), ...remaining]
           const hyperpKeys = [
