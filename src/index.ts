@@ -225,7 +225,10 @@ res.writeHead(429, secureJsonHeaders);
     secretBuf.copy(secretPad);
     providedBuf.copy(providedPad);
     const lengthMatch = secretBuf.length === providedBuf.length;
-    if (!lengthMatch || !timingSafeEqual(secretPad, providedPad)) {
+    // Always run timingSafeEqual — do NOT use || short-circuit, which skips
+    // the crypto comparison when lengths differ and leaks timing info.
+    const contentMatch = timingSafeEqual(secretPad, providedPad);
+    if (!lengthMatch || !contentMatch) {
       recordAuthFailure(clientIp);
 req.resume();
 res.writeHead(401, secureJsonHeaders);
