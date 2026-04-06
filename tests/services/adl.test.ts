@@ -310,6 +310,73 @@ describe("AdlService", () => {
     });
   });
 
+  describe("watchdog timer — cycling guard", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+      service = new AdlService();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("resets _cycling flag when cycle exceeds MAX_CYCLE_MS (5x interval)", async () => {
+      // Setup: start the service with a market source
+      const markets = new Map();
+      service.start(() => markets);
+
+      // Simulate a stuck cycle: manually set _cycling=true with an old timestamp
+      // Access internal state for testing
+      (service as any)._cycling = true;
+      (service as any)._cycleStartedAt = Date.now() - 60_000; // 60s ago (> 5 * 10s default)
+
+      // Advance timer to trigger the next interval tick
+      await vi.advanceTimersByTimeAsync(10_001);
+
+      // The watchdog should have reset _cycling to false
+      expect((service as any)._cycling).toBe(false);
+      // Should have sent a warning alert about the hung cycle
+      expect(shared.sendWarningAlert).toHaveBeenCalledWith(
+        "ADL cycle hung — watchdog reset",
+        expect.any(Array),
+      );
+    });
+
+    it("does not trigger watchdog when cycle completes within MAX_CYCLE_MS", async () => {
+      const markets = new Map();
+      service.start(() => markets);
+
+      // Advance timer — scanAll returns immediately (no markets), well within limit
+      await vi.advanceTimersByTimeAsync(10_001);
+
+      // Watchdog alert should NOT have been sent
+      expect(shared.sendWarningAlert).not.toHaveBeenCalledWith(
+        "ADL cycle hung — watchdog reset",
+        expect.any(Array),
+      );
+    });
+
+    it("skips new cycle when previous cycle is still running (within timeout)", async () => {
+      const markets = new Map();
+      service.start(() => markets);
+
+      // Simulate a running cycle that hasn't exceeded MAX_CYCLE_MS
+      (service as any)._cycling = true;
+      (service as any)._cycleStartedAt = Date.now(); // just started
+
+      // Advance timer — should skip (not reset, not run new cycle)
+      await vi.advanceTimersByTimeAsync(10_001);
+
+      // _cycling should still be true (not reset by watchdog, not cleared by new cycle)
+      expect((service as any)._cycling).toBe(true);
+      // No watchdog alert
+      expect(shared.sendWarningAlert).not.toHaveBeenCalledWith(
+        "ADL cycle hung — watchdog reset",
+        expect.any(Array),
+      );
+    });
+  });
+
   describe("getStats", () => {
     beforeEach(() => {
       service = new AdlService();
