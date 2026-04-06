@@ -43,7 +43,7 @@ import {
   buildIx,
   derivePythPushOraclePDA,
   type DiscoveredMarket,
-} from "@percolator/sdk";
+} from "@percolatorct/sdk";
 import {
   getConnection,
   loadKeypair,

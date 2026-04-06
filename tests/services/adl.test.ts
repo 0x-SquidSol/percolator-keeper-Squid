@@ -16,7 +16,7 @@ vi.mock("@solana/web3.js", async () => {
   };
 });
 
-vi.mock("@percolator/sdk", () => ({
+vi.mock("@percolatorct/sdk", () => ({
   fetchSlab: vi.fn(),
   parseEngine: vi.fn(),
   parseConfig: vi.fn(),
@@ -53,7 +53,7 @@ vi.mock("@percolator/shared", () => ({
 
 // ─── import (after mocks) ─────────────────────────────────────────────────────
 
-import * as sdk from "@percolator/sdk";
+import * as sdk from "@percolatorct/sdk";
 import * as shared from "@percolator/shared";
 import { AdlService } from "../../src/services/adl.js";
 

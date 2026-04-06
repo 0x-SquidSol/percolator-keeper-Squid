@@ -8,7 +8,7 @@
  * When anchor T5 (PERC-8270) ships, wire PrepareAdlArgs / PrepareAdlResult
  * into adl.ts scanMarket() — see the T5 hook comment there.
  */
-import type { DiscoveredMarket } from "@percolator/sdk";
+import type { DiscoveredMarket } from "@percolatorct/sdk";
 
 export interface MarketCrankState {
   market: DiscoveredMarket;

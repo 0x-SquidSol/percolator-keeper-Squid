@@ -5,7 +5,7 @@ import {
   buildIx,
   ACCOUNTS_PUSH_ORACLE_PRICE,
   type MarketConfig,
-} from "@percolator/sdk";
+} from "@percolatorct/sdk";
 import { config, getConnection, loadKeypair, sendWithRetry, eventBus, createLogger, getErrorMessage, sendWarningAlert } from "@percolator/shared";
 
 const logger = createLogger("keeper:oracle");

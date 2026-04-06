@@ -5,7 +5,7 @@ import { PublicKey } from '@solana/web3.js';
 global.fetch = vi.fn();
 
 // Mock external dependencies
-vi.mock('@percolator/sdk', () => ({
+vi.mock('@percolatorct/sdk', () => ({
   encodePushOraclePrice: vi.fn(() => Buffer.from([1, 2, 3])),
   buildAccountMetas: vi.fn(() => []),
   buildIx: vi.fn(() => ({})),

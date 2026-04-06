@@ -15,7 +15,7 @@ import {
   parseEngine,
   parseParams,
   type DiscoveredMarket,
-} from "@percolator/sdk";
+} from "@percolatorct/sdk";
 import { config, getConnection, getFallbackConnection, loadKeypair, sendWithRetry, sendWithRetryKeeper, rateLimitedCall, eventBus, createLogger, sendCriticalAlert, getSupabase } from "@percolator/shared";
 import { OracleService } from "./oracle.js";
 
@@ -168,7 +168,7 @@ export class CrankService {
             continue;
           }
           const data = new Uint8Array(info.data);
-          const { parseHeader, parseConfig, parseEngine, parseParams } = await import("@percolator/sdk");
+          const { parseHeader, parseConfig, parseEngine, parseParams } = await import("@percolatorct/sdk");
           const header = parseHeader(data);
           const marketConfig = parseConfig(data);
           const engine = parseEngine(data);

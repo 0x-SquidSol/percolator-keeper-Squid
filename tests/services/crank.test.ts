@@ -13,7 +13,7 @@ vi.mock('@solana/web3.js', async () => {
 });
 
 // Mock all external dependencies
-vi.mock('@percolator/sdk', () => ({
+vi.mock('@percolatorct/sdk', () => ({
   discoverMarkets: vi.fn(),
   encodeKeeperCrank: vi.fn(() => Buffer.from([1, 2, 3])),
   encodePushOraclePrice: vi.fn(() => Buffer.from([4, 5, 6])),
@@ -70,7 +70,7 @@ vi.mock('@percolator/shared', () => ({
 
 import { PublicKey } from '@solana/web3.js';
 import { CrankService } from '../../src/services/crank.js';
-import * as core from '@percolator/sdk';
+import * as core from '@percolatorct/sdk';
 import * as shared from '@percolator/shared';
 
 describe('CrankService', () => {

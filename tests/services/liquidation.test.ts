@@ -39,7 +39,7 @@ vi.mock('@solana/web3.js', async () => {
 });
 
 // Mock external dependencies
-vi.mock('@percolator/sdk', () => ({
+vi.mock('@percolatorct/sdk', () => ({
   fetchSlab: vi.fn(),
   parseConfig: vi.fn(),
   parseEngine: vi.fn(),
@@ -123,7 +123,7 @@ vi.mock('@percolator/shared', () => ({
 
 import { PublicKey, ComputeBudgetProgram } from '@solana/web3.js';
 import { LiquidationService } from '../../src/services/liquidation.js';
-import * as core from '@percolator/sdk';
+import * as core from '@percolatorct/sdk';
 import * as shared from '@percolator/shared';
 
 // Zero key (all zeros) - used for Pyth-pinned oracleAuthority and Hyperp indexFeedId
