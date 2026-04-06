@@ -113,7 +113,11 @@ export class OracleService {
       if (!res.ok) return null;
       
       const json = (await res.json()) as DexScreenerResponse;
-      // BH7: Use captured timestamp for atomicity
+      // BH7: Use captured timestamp for atomicity.
+      // Delete before set so refreshed entries move to the end of Map
+      // iteration order — ensures eviction targets the least-recently-used
+      // entry, not a frequently-refreshed one stuck at its insertion position.
+      dexScreenerCache.delete(mint);
       dexScreenerCache.set(mint, { data: json, fetchedAt: now });
       // Evict oldest entry when cache exceeds size cap
       if (dexScreenerCache.size > DEX_SCREENER_CACHE_MAX_SIZE) {
