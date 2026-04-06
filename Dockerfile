@@ -9,8 +9,7 @@ WORKDIR /app
 # Copy package files
 COPY package.json pnpm-lock.yaml ./
 
-# Copy vendored local dependencies (if present — used when SDK is vendored via file: specifier)
-COPY vendor/ ./vendor/
+# SDK is now on npm (@percolatorct/sdk) — no vendor directory needed
 
 # Install all dependencies
 RUN pnpm install --frozen-lockfile
