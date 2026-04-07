@@ -21,6 +21,11 @@ const API_TIMEOUT_MS = 10_000; // 10 second timeout for external API calls
 const PRICE_E6_MULTIPLIER = 1_000_000; // Price precision (6 decimals)
 const CACHED_PRICE_MAX_AGE_MS = 60_000; // Reject cached prices older than 60s
 
+// M-4: Maximum duration the on-chain fallback may be used before we stop pushing
+// and let the oracle go stale. This prevents an infinite stale loop where the keeper
+// re-pushes an old on-chain price indefinitely while all external sources are down.
+const ON_CHAIN_FALLBACK_MAX_MS = 60_000; // 60 seconds
+
 // Cross-source validation: reject if DexScreener and Jupiter diverge by more than this %
 // Expressed in basis points (100 bps = 1%) for precise integer comparison
 const MAX_CROSS_SOURCE_DEVIATION_BPS = 1000; // 10.00%
@@ -62,6 +67,11 @@ export class OracleService {
   private _consecutiveSingleSource = 0;
   private _singleSourceAlertSent = false;
   private static readonly SINGLE_SOURCE_ALERT_THRESHOLD = 10;
+  // M-4: Track when an external source (DexScreener or Jupiter) last returned a
+  // valid price for each slab. Used to cap the on-chain fallback duration so that
+  // a prolonged external outage causes the oracle to go stale rather than cycling
+  // the same on-chain price forever.
+  private lastExternalPriceMs = new Map<string, number>();
 
   /** Fetch price from DexScreener (with rate-limit cache) */
   async fetchDexScreenerPrice(mint: string): Promise<bigint | null> {
@@ -296,6 +306,9 @@ export class OracleService {
 
     const entry: PriceEntry = { priceE6, source, timestamp: Date.now() };
     this.recordPrice(slabAddress, entry);
+    // M-4: Record that an external source produced a valid price. This resets the
+    // fallback clock so the on-chain fallback cap counts from the last real fetch.
+    this.lastExternalPriceMs.set(slabAddress, entry.timestamp);
     return entry;
   }
 
@@ -342,6 +355,21 @@ export class OracleService {
     if (!priceEntry) {
       const onChainPrice = marketConfig.authorityPriceE6;
       if (onChainPrice > 0n) {
+        // M-4: Guard against infinite stale loop. If all external sources have been
+        // failing for longer than ON_CHAIN_FALLBACK_MAX_MS, stop pushing the stale
+        // on-chain price. This lets the oracle go stale naturally so the frontend
+        // shows a stale warning and the pause guard can halt trading.
+        const lastExternal = this.lastExternalPriceMs.get(slabAddress) ?? 0;
+        const externalOutageMs = now - lastExternal;
+        if (lastExternal > 0 && externalOutageMs > ON_CHAIN_FALLBACK_MAX_MS) {
+          logger.warn("On-chain fallback exceeded time limit — skipping push to allow oracle to go stale", {
+            mint,
+            slabAddress,
+            externalOutageSeconds: Math.round(externalOutageMs / 1000),
+            limitSeconds: ON_CHAIN_FALLBACK_MAX_MS / 1000,
+          });
+          return false;
+        }
         priceEntry = { priceE6: onChainPrice, source: "on-chain", timestamp: Date.now() };
         logger.info("Using on-chain price", { mint, onChainPrice: onChainPrice.toString() });
       } else {
