@@ -14,6 +14,8 @@ import {
   parseConfig,
   parseEngine,
   parseParams,
+  detectDexType,
+  parseDexPool,
   type DiscoveredMarket,
 } from "@percolatorct/sdk";
 import { config, getConnection, getFallbackConnection, loadKeypair, sendWithRetry, sendWithRetryKeeper, rateLimitedCall, eventBus, createLogger, sendCriticalAlert, getSupabase } from "@percolator/shared";
@@ -459,15 +461,67 @@ export class CrankService {
           const poolKey = new PublicKey(effectiveDexPoolAddress);
 
           // Build accounts: [slab(writable), pool(readonly), clock(readonly), ...remaining]
-          const hyperpKeys = [
+          const hyperpKeys: { pubkey: PublicKey; isSigner: boolean; isWritable: boolean }[] = [
             { pubkey: market.slabAddress, isSigner: false, isWritable: true },
             { pubkey: poolKey, isSigner: false, isWritable: false },
             { pubkey: SYSVAR_CLOCK_PUBKEY, isSigner: false, isWritable: false },
           ];
 
-          // PumpSwap pools need vault0 + vault1 as remaining accounts
-          // For now, pass no remaining — Raydium CLMM doesn't need them
-          // TODO: detect pool type and add vault accounts for PumpSwap/Meteora
+          // Detect DEX pool type and append required remaining accounts:
+          //   PumpSwap:    [3] base_vault, [4] quote_vault  (from pool data at offsets 131, 163)
+          //   Meteora DLMM: [3] vault_y / reserve_y         (from pool data at offset 184)
+          //   Raydium CLMM: no additional accounts needed
+          const poolAccountInfo = await connection.getAccountInfo(poolKey);
+          if (poolAccountInfo !== null) {
+            const dexType = detectDexType(poolAccountInfo.owner);
+            if (dexType === "pumpswap") {
+              // parseDexPool reads baseVault (offset 131) and quoteVault (offset 163)
+              const poolData = new Uint8Array(poolAccountInfo.data);
+              const poolInfo = parseDexPool("pumpswap", poolKey, poolData);
+              if (poolInfo.baseVault && poolInfo.quoteVault) {
+                hyperpKeys.push({ pubkey: poolInfo.baseVault, isSigner: false, isWritable: false });
+                hyperpKeys.push({ pubkey: poolInfo.quoteVault, isSigner: false, isWritable: false });
+                logger.debug("HYPERP: appended PumpSwap vault accounts", {
+                  slabAddress,
+                  baseVault: poolInfo.baseVault.toBase58(),
+                  quoteVault: poolInfo.quoteVault.toBase58(),
+                });
+              } else {
+                logger.warn("HYPERP: PumpSwap pool missing vault pubkeys in parsed data — sending without remaining accounts", {
+                  slabAddress,
+                  poolAddress: poolKey.toBase58(),
+                });
+              }
+            } else if (dexType === "meteora-dlmm") {
+              // reserve_y (vault_y) is stored at byte offset 184 in the LbPair account
+              const METEORA_DLMM_OFF_RESERVE_Y = 184;
+              const METEORA_DLMM_MIN_LEN = METEORA_DLMM_OFF_RESERVE_Y + 32;
+              if (poolAccountInfo.data.length >= METEORA_DLMM_MIN_LEN) {
+                const reserveY = new PublicKey(
+                  poolAccountInfo.data.slice(METEORA_DLMM_OFF_RESERVE_Y, METEORA_DLMM_OFF_RESERVE_Y + 32),
+                );
+                hyperpKeys.push({ pubkey: reserveY, isSigner: false, isWritable: false });
+                logger.debug("HYPERP: appended Meteora DLMM vault_y account", {
+                  slabAddress,
+                  reserveY: reserveY.toBase58(),
+                });
+              } else {
+                logger.warn("HYPERP: Meteora DLMM pool data too short to read reserve_y — sending without remaining accounts", {
+                  slabAddress,
+                  poolAddress: poolKey.toBase58(),
+                  dataLength: poolAccountInfo.data.length,
+                  required: METEORA_DLMM_MIN_LEN,
+                });
+              }
+            }
+            // Raydium CLMM: no remaining accounts needed — on-chain price is read
+            // directly from the pool's sqrt_price_x64 field without vault lookups.
+          } else {
+            logger.warn("HYPERP: could not fetch pool account info for vault detection — sending without remaining accounts", {
+              slabAddress,
+              poolAddress: poolKey.toBase58(),
+            });
+          }
 
           instructions.push(buildIx({ programId, keys: hyperpKeys, data: hyperpData }));
           state.hyperpNoPriceSkipped = false;
