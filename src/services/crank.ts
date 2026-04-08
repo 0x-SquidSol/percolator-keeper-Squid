@@ -21,6 +21,18 @@ import { OracleService } from "./oracle.js";
 
 const logger = createLogger("keeper:crank");
 
+/** Timeout for individual RPC calls — prevents indefinite hangs on unresponsive nodes. */
+const RPC_TIMEOUT_MS = 15_000;
+
+/** Race a promise against a timeout. Rejects with a descriptive error on expiry. */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label}: timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 interface MarketCrankState {
   market: DiscoveredMarket;
   lastCrankTime: number;
@@ -855,7 +867,11 @@ export class CrankService {
 
     let info: Awaited<ReturnType<typeof connection.getAccountInfo>>;
     try {
-      info = await connection.getAccountInfo(slabPubkey);
+      info = await withTimeout(
+        connection.getAccountInfo(slabPubkey),
+        RPC_TIMEOUT_MS,
+        `getAccountInfo(${slabAddress})`,
+      );
     } catch (err) {
       const msg = `RPC error fetching slab: ${err instanceof Error ? err.message : String(err)}`;
       logger.error(msg, { slabAddress });
