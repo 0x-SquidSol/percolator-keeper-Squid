@@ -155,6 +155,10 @@ export class CrankService {
     // instead of ~8 getProgramAccounts calls that trigger 429 rate limits on Helius).
     const marketsFilter = (process.env.MARKETS_FILTER ?? "").trim();
     const allFound: DiscoveredMarket[] = [];
+    // Track which program IDs were successfully scanned. Used by the eviction
+    // logic to avoid incrementing missingDiscoveryCount for markets whose
+    // program scan failed due to transient RPC errors (not genuine removal).
+    const succeededProgramIds = new Set<string>();
     if (marketsFilter) {
       const slabAddresses = marketsFilter.split(",").map(s => s.trim()).filter(Boolean);
       logger.info("Using MARKETS_FILTER — skipping getProgramAccounts discovery", { count: slabAddresses.length });
@@ -181,6 +185,7 @@ export class CrankService {
             engine,
             params,
           });
+          succeededProgramIds.add(info.owner.toBase58());
         } catch (e) {
           logger.warn("MARKETS_FILTER: failed to load slab", { slab: addr.slice(0, 8), error: e instanceof Error ? e.message : String(e) });
         }
@@ -224,6 +229,7 @@ export class CrankService {
       }
 
       if (programSuccess) {
+        succeededProgramIds.add(id);
         allFound.push(...found);
       }
 
@@ -352,13 +358,24 @@ export class CrankService {
       }
     }
 
-    // Bug 17: Track markets missing from discovery, remove after 3 consecutive misses
+    // Bug 17: Track markets missing from discovery, remove after 3 consecutive misses.
+    // Only increment missingDiscoveryCount when the market's owning program was
+    // successfully scanned. If the program scan failed (transient RPC error), the
+    // market's absence proves nothing — don't count it toward eviction.
     for (const [key, state] of this.markets) {
       if (!discoveredKeys.has(key)) {
-        state.missingDiscoveryCount++;
-        if (state.missingDiscoveryCount >= 3) {
-          logger.warn("Removing dead market", { slabAddress: key, missingCount: state.missingDiscoveryCount });
-          this.markets.delete(key);
+        const ownerProgram = state.market.programId.toBase58();
+        if (succeededProgramIds.has(ownerProgram)) {
+          state.missingDiscoveryCount++;
+          if (state.missingDiscoveryCount >= 3) {
+            logger.warn("Removing dead market", { slabAddress: key, missingCount: state.missingDiscoveryCount });
+            this.markets.delete(key);
+          }
+        } else {
+          logger.debug("Skipping eviction — owning program scan failed", {
+            slabAddress: key,
+            programId: ownerProgram,
+          });
         }
       }
     }
