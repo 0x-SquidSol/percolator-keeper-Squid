@@ -23,6 +23,18 @@ import { OracleService } from "./oracle.js";
 
 const logger = createLogger("keeper:liquidation");
 
+/** Timeout for individual RPC calls — prevents indefinite hangs on unresponsive nodes. */
+const RPC_TIMEOUT_MS = 15_000;
+
+/** Race a promise against a timeout. Rejects with a descriptive error on expiry. */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label}: timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 /**
  * Rate-limited fetchSlab with automatic fallback to secondary RPC.
  * Retries up to 3 times with exponential backoff on rate-limit (429) or
@@ -37,7 +49,11 @@ async function fetchSlabWithRetry(
     const conn = attempt === 0 ? getConnection() : getFallbackConnection();
     try {
       await acquireToken();
-      return await fetchSlab(conn, slabPubkey);
+      return await withTimeout(
+        fetchSlab(conn, slabPubkey),
+        RPC_TIMEOUT_MS,
+        `fetchSlab(${slabPubkey.toBase58()})`,
+      );
     } catch (err) {
       lastErr = err;
       const msg = getErrorMessage(err).toLowerCase();
