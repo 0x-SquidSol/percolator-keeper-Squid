@@ -571,9 +571,14 @@ process.on("unhandledRejection", (reason, promise) => {
   });
 });
 
+// H8: uncaughtException means the process is in an undefined state.
+// Log the error and trigger graceful shutdown instead of continuing
+// with potentially corrupted state (half-written maps, broken invariants).
+// Railway's ON_FAILURE restart policy will bring the keeper back up cleanly.
 process.on("uncaughtException", (err) => {
-  logger.error("Uncaught exception — keeping process alive", {
+  logger.error("Uncaught exception — initiating graceful shutdown", {
     error: err.message,
     stack: err.stack,
   });
+  shutdown("uncaughtException").catch(() => process.exit(1));
 });
