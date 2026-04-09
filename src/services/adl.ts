@@ -465,7 +465,7 @@ export class AdlService {
         logger.info("ADL tx sent", {
           slabAddress,
           targetIdx: pos.idx,
-          pnlPct: (Number(pos.pnlPct) / 1_000_000).toFixed(4) + "%",
+          pnlPct: (Number(pos.pnlPct) / 10_000).toFixed(2) + "%",
           sig,
         });
 

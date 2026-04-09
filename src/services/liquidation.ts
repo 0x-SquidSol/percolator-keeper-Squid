@@ -158,9 +158,6 @@ export class LiquidationService {
   // Overlap guard: prevent concurrent scan cycles from interleaving
   private _scanning = false;
   private _scanStartedAt = 0;
-  // BC1: Signature replay protection
-  private recentSignatures = new Map<string, number>(); // signature -> timestamp
-  private readonly signatureTTLMs = 60_000; // 60 seconds
   // PERC-134: Exponential backoff on consecutive scan failures
   private consecutiveFailures = 0;
   private readonly maxBackoffMs = 300_000; // 5 minutes max backoff
@@ -452,16 +449,6 @@ export class LiquidationService {
       //   - Multi-RPC parallel broadcast (+20-40% landing rate)
       //   - Simulation-based tight CU limit (better queue position)
       const sig = await sendWithRetryKeeper(connection, instructions, [keypair], 3);
-
-      // BC1: Track signature to prevent replay attacks
-      const now = Date.now();
-      this.recentSignatures.set(sig, now);
-      // Clean up signatures older than TTL
-      for (const [oldSig, timestamp] of this.recentSignatures.entries()) {
-        if (now - timestamp > this.signatureTTLMs) {
-          this.recentSignatures.delete(oldSig);
-        }
-      }
 
       this.liquidationCount++;
       eventBus.publish("liquidation.success", slabAddress.toBase58(), {

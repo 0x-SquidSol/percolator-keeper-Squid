@@ -55,6 +55,8 @@ interface JupiterResponse {
 }
 
 export class OracleService {
+  // L1: Cache keypair at construction — was re-parsing from env on every pushPrice call
+  private readonly _keypair = loadKeypair(process.env.CRANK_KEYPAIR!);
   private priceHistory = new Map<string, PriceEntry[]>();
   private lastPushTime = new Map<string, number>();
   private _nonAuthorityLogged = new Set<string>();
@@ -380,7 +382,7 @@ export class OracleService {
 
     try {
       const connection = getConnection();
-      const keypair = loadKeypair(process.env.CRANK_KEYPAIR!);
+      const keypair = this._keypair;
       const slabPubkey = new PublicKey(slabAddress);
       const programId = marketProgramId ?? new PublicKey(config.programId);
 
