@@ -358,11 +358,18 @@ export class LiquidationService {
       // Build multi-instruction tx: push price → crank → liquidate
       const instructions = [];
 
-      // Determine oracle account for crank/liquidate
-      const feedIdBytes = market.config.indexFeedId.toBytes();
-      const feedHex = Array.from(feedIdBytes).map(b => b.toString(16).padStart(2, "0")).join("");
-      const isAllZeros = feedHex === "0".repeat(64);
-      const oracleAccount = isAllZeros ? slabAddress : derivePythPushOraclePDA(feedHex)[0];
+      // N1: Determine oracle account using detectOracleMode to match crank/ADL logic.
+      // Admin-oracle markets use slabAddress regardless of indexFeedId; only
+      // pyth-pinned markets derive a Pyth PDA from the feed ID.
+      const oracleMode = detectOracleMode(market.config);
+      let oracleAccount: PublicKey;
+      if (oracleMode === "pyth-pinned") {
+        const feedHex = Array.from(market.config.indexFeedId.toBytes())
+          .map(b => b.toString(16).padStart(2, "0")).join("");
+        oracleAccount = derivePythPushOraclePDA(feedHex)[0];
+      } else {
+        oracleAccount = slabAddress;
+      }
 
       // 1. Push oracle price only if crank wallet IS the oracle authority
       // (user-owned oracle markets skip the push — user pushes manually)
