@@ -62,6 +62,7 @@ const STALE_ALERT_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes → alert
 const STALE_PAUSE_THRESHOLD_MS = 10 * 60 * 1000; // 10 minutes → pause cranking
 const STARTUP_GRACE_MS = 5 * 60 * 1000; // 5 minutes grace on startup — avoids false alerts on every deploy
 const _keeperStartTime = Date.now();
+let _lastOracleStaleAlertTime = 0;
 
 const staleCheckInterval = setInterval(() => {
   // Skip stale checks during startup grace period (GH#29 — false CRITICAL floods on deploy)
@@ -87,8 +88,9 @@ const staleCheckInterval = setInterval(() => {
     }
   }
 
-  // Send alert for 5-min stale markets (includes paused ones)
-  if (alertStale.length > 0) {
+  // N8: Rate-limit stale oracle alerts to once per 5 min (matching liq pattern)
+  if (alertStale.length > 0 && Date.now() - _lastOracleStaleAlertTime > 5 * 60 * 1000) {
+    _lastOracleStaleAlertTime = Date.now();
     sendCriticalAlert("Oracle stale for markets", [
       { name: "Stale Markets", value: alertStale.join(", "), inline: false },
       { name: "Paused (>10min)", value: stalePausedMarkets.size.toString(), inline: true },
