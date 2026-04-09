@@ -1,7 +1,8 @@
 import "dotenv/config";
 import http from "node:http";
 import { timingSafeEqual } from "node:crypto";
-import { config, createLogger, initSentry, captureException, sendInfoAlert, sendCriticalAlert, createServiceMonitors } from "@percolator/shared";
+import { config, createLogger, initSentry, captureException, sendInfoAlert, sendCriticalAlert, sendWarningAlert, createServiceMonitors, getConnection, loadKeypair } from "@percolator/shared";
+import { LAMPORTS_PER_SOL } from "@solana/web3.js";
 import { OracleService } from "./services/oracle.js";
 import { CrankService } from "./services/crank.js";
 import { LiquidationService } from "./services/liquidation.js";
@@ -63,6 +64,51 @@ const STALE_PAUSE_THRESHOLD_MS = 10 * 60 * 1000; // 10 minutes → pause crankin
 const STARTUP_GRACE_MS = 5 * 60 * 1000; // 5 minutes grace on startup — avoids false alerts on every deploy
 const _keeperStartTime = Date.now();
 
+// ── SOL Balance Monitoring (C4) ──────────────────────────────────────
+const SOL_WARN_LAMPORTS = 50_000_000;      // 0.05 SOL — warning
+const SOL_CRITICAL_LAMPORTS = 10_000_000;  // 0.01 SOL — critical, txs will fail
+let _lastKnownBalanceLamports: number | null = null;
+let _lastBalanceAlertTime = 0;
+const _keeperPublicKey = loadKeypair(process.env.CRANK_KEYPAIR!).publicKey;
+logger.info("Keeper wallet loaded", { address: _keeperPublicKey.toBase58() });
+
+async function checkWalletBalance(context: string): Promise<void> {
+  try {
+    const conn = getConnection();
+    const lamports = await conn.getBalance(_keeperPublicKey);
+    _lastKnownBalanceLamports = lamports;
+    const balanceSol = (lamports / LAMPORTS_PER_SOL).toFixed(4);
+
+    if (lamports < SOL_CRITICAL_LAMPORTS) {
+      logger.error("Keeper wallet SOL balance CRITICAL — transactions will fail", {
+        balanceLamports: lamports, balanceSol, wallet: _keeperPublicKey.toBase58(), context,
+      });
+      if (Date.now() - _lastBalanceAlertTime > 5 * 60_000) {
+        _lastBalanceAlertTime = Date.now();
+        sendCriticalAlert("Keeper wallet SOL critically low", [
+          { name: "Balance", value: `${balanceSol} SOL`, inline: true },
+          { name: "Wallet", value: _keeperPublicKey.toBase58(), inline: false },
+        ]).catch(() => {});
+      }
+    } else if (lamports < SOL_WARN_LAMPORTS) {
+      logger.warn("Keeper wallet SOL balance low", {
+        balanceLamports: lamports, balanceSol, wallet: _keeperPublicKey.toBase58(), context,
+      });
+      if (Date.now() - _lastBalanceAlertTime > 5 * 60_000) {
+        _lastBalanceAlertTime = Date.now();
+        sendWarningAlert("Keeper wallet SOL balance low", [
+          { name: "Balance", value: `${balanceSol} SOL`, inline: true },
+          { name: "Wallet", value: _keeperPublicKey.toBase58(), inline: false },
+        ]).catch(() => {});
+      }
+    }
+  } catch (err) {
+    logger.debug("Balance check failed (non-fatal)", {
+      error: err instanceof Error ? err.message : String(err), context,
+    });
+  }
+}
+
 const staleCheckInterval = setInterval(() => {
   // Skip stale checks during startup grace period (GH#29 — false CRITICAL floods on deploy)
   if (Date.now() - _keeperStartTime < STARTUP_GRACE_MS) return;
@@ -94,6 +140,9 @@ const staleCheckInterval = setInterval(() => {
       { name: "Paused (>10min)", value: stalePausedMarkets.size.toString(), inline: true },
     ]).catch(() => {});
   }
+
+  // C4: Piggyback wallet SOL balance check on this 60s interval
+  checkWalletBalance("periodic").catch(() => {});
 }, 60_000);
 
 // GH#2025: Alert when liquidation scanner stalls (no scan completed for >3 min)
@@ -345,6 +394,11 @@ res.writeHead(401, secureJsonHeaders);
         status = "degraded"; // Liquidation scan stalled >2 min
       }
     }
+
+    // C4: Degrade health if wallet balance is critically low — can't send txs without SOL
+    if (_lastKnownBalanceLamports !== null && _lastKnownBalanceLamports < SOL_CRITICAL_LAMPORTS && status !== "down") {
+      status = "down";
+    }
     
     // ADL stats
     let adlStats: Record<string, unknown> | null = null;
@@ -367,6 +421,20 @@ res.writeHead(401, secureJsonHeaders);
 
     const healthData = {
       status,
+      wallet: {
+        address: _keeperPublicKey.toBase58(),
+        balanceLamports: _lastKnownBalanceLamports,
+        balanceSol: _lastKnownBalanceLamports !== null
+          ? (_lastKnownBalanceLamports / LAMPORTS_PER_SOL).toFixed(4)
+          : null,
+        balanceStatus: _lastKnownBalanceLamports === null
+          ? "unknown"
+          : _lastKnownBalanceLamports < SOL_CRITICAL_LAMPORTS
+            ? "critical"
+            : _lastKnownBalanceLamports < SOL_WARN_LAMPORTS
+              ? "warning"
+              : "ok",
+      },
       lastCrankTime: mostRecentCrank,
       lastOracleUpdate: mostRecentOracle,
       marketsTracked,
@@ -417,6 +485,9 @@ async function start() {
     const primary = getConnection();
     const slot = await primary.getSlot();
     logger.info("Primary RPC connectivity verified", { slot });
+
+    // C4: Check wallet SOL balance at startup
+    await checkWalletBalance("startup");
 
     try {
       const fallback = getFallbackConnection();
@@ -492,6 +563,7 @@ async function start() {
   // Send startup alert
   await sendInfoAlert("Keeper service started", [
     { name: "Markets Tracked", value: markets.length.toString(), inline: true },
+    { name: "Wallet Balance", value: _lastKnownBalanceLamports !== null ? `${(_lastKnownBalanceLamports / LAMPORTS_PER_SOL).toFixed(4)} SOL` : "unknown", inline: true },
     { name: "Health Endpoint", value: `http://localhost:${healthPort}/health`, inline: true },
   ]).catch(() => {}); // Don't crash if alert fails
 }
