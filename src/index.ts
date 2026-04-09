@@ -497,6 +497,7 @@ async function start() {
 }
 
 start().catch((err) => {
+  captureException(err instanceof Error ? err : new Error(String(err)));
   logger.error("Failed to start keeper", { error: err instanceof Error ? err.message : String(err), stack: err instanceof Error ? err.stack : undefined });
   // Don't exit — keep the process alive for healthcheck + retry
   logger.info("Keeper will stay alive for healthcheck despite startup error");
@@ -565,6 +566,9 @@ process.on("SIGINT", () => shutdown("SIGINT"));
 // and retry on the next interval. Without these handlers, Node.js 15+ exits on
 // unhandled rejections by default, causing the crash-loop seen in Railway logs.
 process.on("unhandledRejection", (reason, promise) => {
+  // N7: Report to Sentry before logging — ensures Sentry gets the error
+  // even if the logger itself throws.
+  captureException(reason instanceof Error ? reason : new Error(String(reason)));
   logger.error("Unhandled promise rejection — keeping process alive", {
     reason: reason instanceof Error ? reason.message : String(reason),
     stack: reason instanceof Error ? reason.stack : undefined,
@@ -572,6 +576,7 @@ process.on("unhandledRejection", (reason, promise) => {
 });
 
 process.on("uncaughtException", (err) => {
+  captureException(err);
   logger.error("Uncaught exception — keeping process alive", {
     error: err.message,
     stack: err.stack,
