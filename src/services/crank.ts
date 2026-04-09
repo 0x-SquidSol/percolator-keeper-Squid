@@ -180,7 +180,11 @@ export class CrankService {
       for (const addr of slabAddresses) {
         try {
           const pubkey = new PublicKey(addr);
-          const info = await conn.getAccountInfo(pubkey);
+          const info = await withTimeout(
+            conn.getAccountInfo(pubkey),
+            RPC_TIMEOUT_MS,
+            `MARKETS_FILTER getAccountInfo(${addr.slice(0, 8)})`,
+          );
           if (!info?.data) {
             logger.warn("MARKETS_FILTER: slab not found on-chain", { slab: addr.slice(0, 8) });
             continue;
@@ -500,7 +504,23 @@ export class CrankService {
           //   PumpSwap:    [3] base_vault, [4] quote_vault  (from pool data at offsets 131, 163)
           //   Meteora DLMM: [3] vault_y / reserve_y         (from pool data at offset 184)
           //   Raydium CLMM: no additional accounts needed
-          const poolAccountInfo = await connection.getAccountInfo(poolKey);
+          // M1: Wrap pool lookup with timeout — a hung RPC should not block
+          // the entire crank batch. Pool data is optional; the crank proceeds
+          // without remaining accounts if the lookup fails.
+          let poolAccountInfo: Awaited<ReturnType<typeof connection.getAccountInfo>> = null;
+          try {
+            poolAccountInfo = await withTimeout(
+              connection.getAccountInfo(poolKey),
+              RPC_TIMEOUT_MS,
+              `HYPERP getAccountInfo(pool ${poolKey.toBase58().slice(0, 8)})`,
+            );
+          } catch (poolErr) {
+            logger.warn("HYPERP: pool getAccountInfo failed — sending without remaining accounts", {
+              slabAddress,
+              poolAddress: poolKey.toBase58(),
+              error: poolErr instanceof Error ? poolErr.message : String(poolErr),
+            });
+          }
           if (poolAccountInfo !== null) {
             const dexType = detectDexType(poolAccountInfo.owner);
             if (dexType === "pumpswap") {
