@@ -303,8 +303,12 @@ export class LiquidationService {
               maintenanceMarginBps,
             });
           }
-        } catch {
-          // Skip accounts that fail to parse
+        } catch (err) {
+          // N6: Log parse failures — a silent skip could hide systematic issues
+          logger.debug("Failed to parse account at index", {
+            slabAddress, accountIndex: i,
+            error: err instanceof Error ? err.message : String(err),
+          });
           continue;
         }
       }
