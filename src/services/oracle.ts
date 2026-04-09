@@ -120,8 +120,11 @@ export class OracleService {
       });
       clearTimeout(timeoutId);
 
-      if (!res.ok) return null;
-      
+      if (!res.ok) {
+        logger.warn("DexScreener API returned non-OK status", { mint, status: res.status });
+        return null;
+      }
+
       const json = (await res.json()) as DexScreenerResponse;
       // BH7: Use captured timestamp for atomicity.
       // Delete before set so refreshed entries move to the end of Map
@@ -141,7 +144,8 @@ export class OracleService {
       const parsed = parseFloat(pair.priceUsd);
       if (!isFinite(parsed) || parsed <= 0) return null;
       return BigInt(Math.round(parsed * PRICE_E6_MULTIPLIER));
-    } catch {
+    } catch (err) {
+      logger.debug("DexScreener fetch failed", { mint, error: err instanceof Error ? err.message : String(err) });
       return null;
     }
   }
@@ -175,15 +179,19 @@ export class OracleService {
       });
       clearTimeout(timeoutId);
 
-      if (!res.ok) return null;
-      
+      if (!res.ok) {
+        logger.warn("Jupiter API returned non-OK status", { mint, status: res.status });
+        return null;
+      }
+
       const json = (await res.json()) as JupiterResponse;
       const priceStr = json.data?.[mint]?.price;
       if (!priceStr) return null;
       const parsed = parseFloat(priceStr);
       if (!isFinite(parsed) || parsed <= 0) return null;
       return BigInt(Math.round(parsed * PRICE_E6_MULTIPLIER));
-    } catch {
+    } catch (err) {
+      logger.debug("Jupiter fetch failed", { mint, error: err instanceof Error ? err.message : String(err) });
       return null;
     }
   }
