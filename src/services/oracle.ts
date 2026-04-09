@@ -359,9 +359,15 @@ export class OracleService {
         // failing for longer than ON_CHAIN_FALLBACK_MAX_MS, stop pushing the stale
         // on-chain price. This lets the oracle go stale naturally so the frontend
         // shows a stale warning and the pause guard can halt trading.
-        const lastExternal = this.lastExternalPriceMs.get(slabAddress) ?? 0;
+        // H2: Seed the fallback clock on first encounter so the 60s cap applies
+        // even to markets that have never received an external price.
+        let lastExternal = this.lastExternalPriceMs.get(slabAddress);
+        if (lastExternal === undefined) {
+          lastExternal = now;
+          this.lastExternalPriceMs.set(slabAddress, now);
+        }
         const externalOutageMs = now - lastExternal;
-        if (lastExternal > 0 && externalOutageMs > ON_CHAIN_FALLBACK_MAX_MS) {
+        if (externalOutageMs > ON_CHAIN_FALLBACK_MAX_MS) {
           logger.warn("On-chain fallback exceeded time limit — skipping push to allow oracle to go stale", {
             mint,
             slabAddress,
