@@ -320,24 +320,24 @@ describe("AdlService", () => {
       vi.useRealTimers();
     });
 
-    it("resets _cycling flag when cycle exceeds MAX_CYCLE_MS (5x interval)", async () => {
+    it("logs alert but does NOT reset _cycling when cycle exceeds MAX_CYCLE_MS (N3)", async () => {
       // Setup: start the service with a market source
       const markets = new Map();
       service.start(() => markets);
 
       // Simulate a stuck cycle: manually set _cycling=true with an old timestamp
-      // Access internal state for testing
       (service as any)._cycling = true;
       (service as any)._cycleStartedAt = Date.now() - 60_000; // 60s ago (> 5 * 10s default)
 
       // Advance timer to trigger the next interval tick
       await vi.advanceTimersByTimeAsync(10_001);
 
-      // The watchdog should have reset _cycling to false
-      expect((service as any)._cycling).toBe(false);
-      // Should have sent a warning alert about the hung cycle
+      // N3: The watchdog should NOT reset _cycling — resetting would allow
+      // concurrent cycles. The old cycle finishes naturally via RPC timeouts.
+      expect((service as any)._cycling).toBe(true);
+      // Should still send a warning alert about the hung cycle
       expect(shared.sendWarningAlert).toHaveBeenCalledWith(
-        "ADL cycle hung — watchdog reset",
+        "ADL cycle hung — exceeded max duration",
         expect.any(Array),
       );
     });

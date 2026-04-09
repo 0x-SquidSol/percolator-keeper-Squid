@@ -554,15 +554,17 @@ export class AdlService {
       if (this._cycling) {
         const elapsed = Date.now() - this._cycleStartedAt;
         if (elapsed > MAX_CYCLE_MS) {
-          logger.error("ADL cycle watchdog: cycle exceeded max duration, force-resetting", {
+          logger.error("ADL cycle watchdog: cycle exceeded max duration — waiting for natural completion", {
             elapsedMs: elapsed,
             maxCycleMs: MAX_CYCLE_MS,
           });
-          sendWarningAlert("ADL cycle hung — watchdog reset", [
+          sendWarningAlert("ADL cycle hung — exceeded max duration", [
             { name: "Elapsed", value: `${Math.round(elapsed / 1000)}s`, inline: true },
             { name: "Max", value: `${Math.round(MAX_CYCLE_MS / 1000)}s`, inline: true },
           ])?.catch(() => {});
-          this._cycling = false;
+          // N3: Do NOT reset _cycling — the old cycle will finish via RPC timeouts.
+          // Resetting would allow a concurrent cycle, causing duplicate ADL txs
+          // and state corruption from two async operations mutating shared maps.
         }
         return;
       }

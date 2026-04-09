@@ -597,11 +597,13 @@ export class LiquidationService {
       if (this._scanning) {
         const elapsed = Date.now() - this._scanStartedAt;
         if (elapsed > MAX_SCAN_MS) {
-          logger.error("Liquidation scan watchdog: cycle exceeded max duration, force-resetting", {
+          logger.error("Liquidation scan watchdog: cycle exceeded max duration — waiting for natural completion", {
             elapsedMs: elapsed,
             maxScanMs: MAX_SCAN_MS,
           });
-          this._scanning = false;
+          // N3: Do NOT reset _scanning — the old cycle will finish via RPC timeouts.
+          // Resetting would allow a concurrent cycle, causing duplicate liquidations
+          // and state corruption from two async operations mutating shared counters.
         }
         return;
       }
