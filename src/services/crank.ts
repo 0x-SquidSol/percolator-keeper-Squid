@@ -984,12 +984,41 @@ export class CrankService {
         mainnetCA,
       });
 
+      // M4: Fetch Supabase metadata (dexPoolAddress) for the registered market.
+      // Without this, HYPERP markets have no pool address until next discover() cycle.
+      try {
+        const { data: sbData } = await getSupabase()
+          .from("markets")
+          .select("dex_pool_address, mainnet_ca")
+          .eq("slab_address", slabAddress)
+          .maybeSingle();
+        if (sbData) {
+          const base58Re = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+          const state = this.markets.get(slabAddress)!;
+          if (sbData.dex_pool_address && base58Re.test(sbData.dex_pool_address)) {
+            state.dexPoolAddress = sbData.dex_pool_address;
+          }
+          if (sbData.mainnet_ca && base58Re.test(sbData.mainnet_ca) && !state.mainnetCA) {
+            state.mainnetCA = sbData.mainnet_ca;
+          }
+        }
+      } catch (sbErr) {
+        logger.warn("Failed to fetch Supabase metadata for hot-registered market", {
+          slabAddress, error: sbErr instanceof Error ? sbErr.message : String(sbErr),
+        });
+      }
+
       logger.info("Hot-registered new market", { slabAddress, programId: programId.toBase58() });
 
-      // Trigger immediate oracle push + crank so price is live within seconds
-      await this.crankMarket(slabAddress);
+      // M5: Capture crankMarket return value to report accurate success/failure
+      const crankOk = await this.crankMarket(slabAddress);
 
-      return { success: true, message: "Market registered and initial crank triggered" };
+      return {
+        success: true,
+        message: crankOk
+          ? "Market registered and initial crank succeeded"
+          : "Market registered but initial crank failed — will retry on next cycle",
+      };
     } catch (err) {
       const msg = `Failed to parse slab: ${err instanceof Error ? err.message : String(err)}`;
       logger.error(msg, { slabAddress });
