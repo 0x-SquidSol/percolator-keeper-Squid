@@ -201,16 +201,11 @@ export class LiquidationService {
         price = resolvedPrice;
         if (price === 0n) return []; // No price resolved yet
       } else if (oracleMode === "hyperp") {
+        // H3: Use lastEffectivePriceE6 (DEX pool mark price) for Hyperp.
+        // authorityPriceE6 is not the price source for Hyperp mode and is
+        // legitimately 0 when the oracle authority hasn't pushed a price.
         price = resolvedPrice;
         if (price === 0n) return []; // Market not bootstrapped yet
-
-        // Sanity check: mark price should also be non-zero in a healthy Hyperp market
-        if (cfg.authorityPriceE6 === 0n) {
-          if (engine.totalOpenInterest > 0n) {
-            logger.warn("Hyperp market has zero mark price, skipping", { slabAddress });
-          }
-          return [];
-        }
       } else {
         // Admin oracle — resolveMarketPrice handles staleness fallback
         price = resolvedPrice;
