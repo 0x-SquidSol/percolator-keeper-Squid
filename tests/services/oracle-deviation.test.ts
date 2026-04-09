@@ -316,6 +316,58 @@ describe('Historical deviation — boundary conditions', () => {
     const r4 = await svc.fetchPrice(mint4, slab);
     expect(r4).toBeNull();
   });
+
+  it('H1: accepts deviated price after 5 consecutive rejections (no permanent brick)', async () => {
+    const slab = freshSlab();
+    // Seed at $1.00
+    await seedPrice(slab, 1.00);
+
+    // Price jumps to $2.00 (100% deviation) — should be rejected 4 times, accepted on 5th
+    for (let i = 0; i < 4; i++) {
+      const mint = freshMint();
+      mockBothSources(2.00, 2.00, mint);
+      const r = await svc.fetchPrice(mint, slab);
+      expect(r).toBeNull();
+    }
+
+    // 5th consecutive rejection — should be accepted
+    const mintAccept = freshMint();
+    mockBothSources(2.00, 2.00, mintAccept);
+    const rAccept = await svc.fetchPrice(mintAccept, slab);
+    expect(rAccept).not.toBeNull();
+    expect(rAccept!.priceE6).toBe(toE6(2.00));
+  });
+
+  it('H1: resets rejection counter when a normal price is accepted', async () => {
+    const slab = freshSlab();
+    await seedPrice(slab, 1.00);
+
+    // 2 consecutive rejections at $2.00
+    for (let i = 0; i < 2; i++) {
+      const mint = freshMint();
+      mockBothSources(2.00, 2.00, mint);
+      expect(await svc.fetchPrice(mint, slab)).toBeNull();
+    }
+
+    // Normal price accepted ($1.10, within 30%)
+    const mintNormal = freshMint();
+    mockBothSources(1.10, 1.10, mintNormal);
+    const rNormal = await svc.fetchPrice(mintNormal, slab);
+    expect(rNormal).not.toBeNull();
+
+    // Counter should be reset — 4 more rejections at $2.00 should NOT accept
+    for (let i = 0; i < 4; i++) {
+      const mint = freshMint();
+      mockBothSources(2.00, 2.00, mint);
+      expect(await svc.fetchPrice(mint, slab)).toBeNull();
+    }
+
+    // 5th consecutive from fresh counter — NOW accepted
+    const mintFinal = freshMint();
+    mockBothSources(2.00, 2.00, mintFinal);
+    const rFinal = await svc.fetchPrice(mintFinal, slab);
+    expect(rFinal).not.toBeNull();
+  });
 });
 
 // ─── 3. Admin-oracle / pumpswap price computation (GH#1376 regression) ─────────
