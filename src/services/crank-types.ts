@@ -14,7 +14,6 @@ export interface MarketCrankState {
   market: DiscoveredMarket;
   lastCrankTime: number;
   successCount: number;
-  failureCount: number;
   consecutiveFailures: number;
   isActive: boolean;
   missingDiscoveryCount: number;

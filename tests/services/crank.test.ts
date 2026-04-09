@@ -240,7 +240,6 @@ describe('CrankService', () => {
       expect(result).toBe(false);
       
       const state = crankService.getMarkets().get(slabAddress);
-      expect(state?.failureCount).toBe(1);
       expect(state?.consecutiveFailures).toBe(1);
     });
 
@@ -498,8 +497,7 @@ describe('CrankService', () => {
 
       const state = crankService.getMarkets().get(slabAddress)!;
       expect(state.foreignOracleSkipped).toBe(true);
-      // Should not increment failure counters — this is an intentional skip, not a failure
-      expect(state.failureCount).toBe(0);
+      // Should not increment failure counter — this is an intentional skip, not a failure
       expect(state.consecutiveFailures).toBe(0);
     });
 

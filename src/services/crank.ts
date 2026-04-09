@@ -39,7 +39,6 @@ interface MarketCrankState {
   market: DiscoveredMarket;
   lastCrankTime: number;
   successCount: number;
-  failureCount: number;
   consecutiveFailures: number;
   /** Considered active if it has had at least one successful crank */
   isActive: boolean;
@@ -305,7 +304,7 @@ export class CrankService {
           market,
           lastCrankTime: 0,
           successCount: 0,
-          failureCount: 0,
+  
           consecutiveFailures: 0,
           isActive: true,
           missingDiscoveryCount: 0,
@@ -572,7 +571,7 @@ export class CrankService {
         state.successCount++;
         state.consecutiveFailures = 0;
         state.isActive = true;
-        if (state.failureCount > 0) state.failureCount = 0;
+
         eventBus.publish("crank.success", slabAddress, { signature: sig });
         return true;
       }
@@ -675,7 +674,7 @@ export class CrankService {
       eventBus.publish("crank.success", slabAddress, { signature: sig });
       return true;
     } catch (err) {
-      state.failureCount++;
+
       state.consecutiveFailures++;
 
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -977,7 +976,7 @@ export class CrankService {
         market,
         lastCrankTime: 0,
         successCount: 0,
-        failureCount: 0,
+
         consecutiveFailures: 0,
         isActive: true,
         missingDiscoveryCount: 0,
@@ -1075,13 +1074,13 @@ export class CrankService {
     }
   }
 
-  getStatus(): Record<string, { lastCrankTime: number; successCount: number; failureCount: number; isActive: boolean }> {
-    const status: Record<string, { lastCrankTime: number; successCount: number; failureCount: number; isActive: boolean }> = {};
+  getStatus(): Record<string, { lastCrankTime: number; successCount: number; consecutiveFailures: number; isActive: boolean }> {
+    const status: Record<string, { lastCrankTime: number; successCount: number; consecutiveFailures: number; isActive: boolean }> = {};
     for (const [key, state] of this.markets) {
       status[key] = {
         lastCrankTime: state.lastCrankTime,
         successCount: state.successCount,
-        failureCount: state.failureCount,
+        consecutiveFailures: state.consecutiveFailures,
         isActive: state.isActive,
       };
     }

@@ -51,10 +51,6 @@ if (adlEnabled) {
   logger.info("ADL service disabled — set ADL_ENABLED=true to enable (requires T8+T10)");
 }
 
-// Health state tracking
-let lastSuccessfulCrankTime = 0;
-let lastOracleUpdateTime = 0;
-
 // Stale oracle pause guard — markets paused due to stale oracle data
 const stalePausedMarkets = new Set<string>();
 
@@ -125,22 +121,14 @@ export function isMarketStalePaused(slabAddress: string): boolean {
 // Wire stale pause check into crank service
 crankService.setStalePauseCheck(isMarketStalePaused);
 
-// Subscribe to crank events to track health
-crankService.getMarkets().forEach((_, slabAddress) => {
-  const checkCrankHealth = () => {
-    const markets = crankService.getMarkets();
-    for (const [_, state] of markets) {
-      if (state.lastCrankTime > lastSuccessfulCrankTime) {
-        lastSuccessfulCrankTime = state.lastCrankTime;
-      }
-    }
-  };
-  setInterval(checkCrankHealth, 10_000); // Check every 10s
-});
-
 // Health endpoint
 const startupTime = Date.now();
 const healthPort = Number(process.env.KEEPER_HEALTH_PORT ?? 8081);
+if (!Number.isInteger(healthPort) || healthPort < 1 || healthPort > 65535) {
+  throw new Error(
+    `Invalid KEEPER_HEALTH_PORT: "${process.env.KEEPER_HEALTH_PORT}" — must be an integer 1..65535`
+  );
+}
 
 // Rate limiter for /register: max 5 failed auth attempts per IP per 60 seconds.
 // Prevents brute-force attacks against the shared secret.
@@ -396,6 +384,12 @@ res.writeHead(401, secureJsonHeaders);
     res.end("Not Found");
   }
 });
+
+// L3: HTTP server hardening — prevent slowloris and resource exhaustion
+healthServer.requestTimeout = 10_000;    // 10s max for entire request
+healthServer.headersTimeout = 5_000;     // 5s max to receive headers
+healthServer.keepAliveTimeout = 5_000;   // 5s keep-alive idle timeout
+healthServer.maxConnections = 50;        // cap concurrent connections
 
 healthServer.listen(healthPort, () => {
   logger.info("Health endpoint started", { port: healthPort });
