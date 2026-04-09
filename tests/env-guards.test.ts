@@ -89,4 +89,54 @@ describe("validateKeeperEnvGuards", () => {
 
     expect(() => validateKeeperEnvGuards(env)).not.toThrow();
   });
+
+  // C2: mainnet fallback RPC network mismatch guard
+  it("throws when NETWORK=mainnet and FALLBACK_RPC_URL is not set", () => {
+    const env = {
+      NETWORK: "mainnet",
+    } as NodeJS.ProcessEnv;
+
+    expect(() => validateKeeperEnvGuards(env)).toThrow(
+      "FALLBACK_RPC_URL must be set when NETWORK=mainnet"
+    );
+  });
+
+  it("throws when NETWORK=mainnet and FALLBACK_RPC_URL points to devnet", () => {
+    const env = {
+      NETWORK: "mainnet",
+      FALLBACK_RPC_URL: "https://api.devnet.solana.com",
+    } as NodeJS.ProcessEnv;
+
+    expect(() => validateKeeperEnvGuards(env)).toThrow(
+      "appears to be a devnet endpoint"
+    );
+  });
+
+  it("throws when NETWORK=mainnet and FALLBACK_RPC_URL contains devnet in Helius URL", () => {
+    const env = {
+      NETWORK: "mainnet",
+      FALLBACK_RPC_URL: "https://devnet.helius-rpc.com/?api-key=abc123",
+    } as NodeJS.ProcessEnv;
+
+    expect(() => validateKeeperEnvGuards(env)).toThrow(
+      "appears to be a devnet endpoint"
+    );
+  });
+
+  it("does not throw when NETWORK=mainnet and FALLBACK_RPC_URL is a mainnet endpoint", () => {
+    const env = {
+      NETWORK: "mainnet",
+      FALLBACK_RPC_URL: "https://mainnet.helius-rpc.com/?api-key=abc123",
+    } as NodeJS.ProcessEnv;
+
+    expect(() => validateKeeperEnvGuards(env)).not.toThrow();
+  });
+
+  it("does not throw when NETWORK=devnet and FALLBACK_RPC_URL is not set", () => {
+    const env = {
+      NETWORK: "devnet",
+    } as NodeJS.ProcessEnv;
+
+    expect(() => validateKeeperEnvGuards(env)).not.toThrow();
+  });
 });
