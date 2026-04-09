@@ -205,14 +205,18 @@ function checkAdlTrigger(
     ADL_INSURANCE_UTIL_THRESHOLD_BPS > 0n &&
     utilizationBps >= ADL_INSURANCE_UTIL_THRESHOLD_BPS;
 
-  // ADL disabled if max_pnl_cap == 0 UNLESS insurance utilization gate fires
+  // ADL disabled when max_pnl_cap == 0 (matches isAdlNeeded semantics)
   const adlNeeded =
-    capExceeded || insuranceDepleted || utilizationTriggered;
+    maxPnlCap > 0n && (capExceeded || insuranceDepleted || utilizationTriggered);
 
+  // When cap is exceeded, deleverage the overshoot.
+  // When triggered by insurance alone (cap not exceeded), deleverage 20%
+  // of pnlPosTot per scan — conservative ramp-down that lets multiple
+  // scans gradually reduce exposure without over-deleveraging.
   const excess =
     capExceeded && maxPnlCap > 0n
       ? pnlPosTot - maxPnlCap
-      : pnlPosTot; // Use full pnlPosTot as excess when triggered by insurance
+      : pnlPosTot / 5n;
 
   return {
     slabAddress,

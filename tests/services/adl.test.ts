@@ -175,6 +175,25 @@ describe("AdlService", () => {
       const result = await service.scanMarket(slabAddress, makeMarket() as any);
       expect(result).toBe(0);
     });
+
+    it("returns 0 when max_pnl_cap is 0 even with high insurance utilization (C5)", async () => {
+      vi.mocked(sdk.fetchSlab).mockResolvedValue(new Uint8Array(1024));
+      // High insurance utilization: feeRevenue=10M, balance=1M → 90% utilized
+      vi.mocked(sdk.parseEngine).mockReturnValue({
+        pnlPosTot: 5_000_000n,
+        insuranceFund: {
+          balance: 1_000_000n,
+          feeRevenue: 10_000_000n,
+          isolatedBalance: 0n,
+          isolationBps: 0,
+        },
+      } as any);
+      vi.mocked(sdk.parseConfig).mockReturnValue(makeConfig({ maxPnlCap: 0n }) as any);
+
+      const result = await service.scanMarket(slabAddress, makeMarket() as any);
+      expect(result).toBe(0);
+      expect(shared.sendWithRetryKeeper).not.toHaveBeenCalled();
+    });
   });
 
   describe("scanMarket — ADL triggered", () => {
