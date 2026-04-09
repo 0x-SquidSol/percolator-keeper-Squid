@@ -13,6 +13,14 @@ export function validateKeeperEnvGuards(env: NodeJS.ProcessEnv = process.env): v
   // http:// and ws:// transmit signed transactions and account data unencrypted,
   // enabling MITM attacks on the network path.
   const allowInsecure = env.ALLOW_INSECURE_RPC === "true";
+  // H9: Never allow insecure RPC on mainnet — signed transactions with real funds
+  // would be exposed to MITM interception over plaintext HTTP/WS.
+  if (allowInsecure && env.NETWORK === "mainnet") {
+    throw new Error(
+      "ALLOW_INSECURE_RPC=true is not permitted when NETWORK=mainnet. " +
+      "Plaintext RPC exposes signed transactions to MITM attacks."
+    );
+  }
   if (!allowInsecure) {
     const rpcUrl = env.SOLANA_RPC_URL?.trim();
     if (rpcUrl && !rpcUrl.startsWith("https://")) {

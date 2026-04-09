@@ -89,4 +89,25 @@ describe("validateKeeperEnvGuards", () => {
 
     expect(() => validateKeeperEnvGuards(env)).not.toThrow();
   });
+
+  // H9: ALLOW_INSECURE_RPC must be rejected on mainnet
+  it("throws when ALLOW_INSECURE_RPC=true and NETWORK=mainnet", () => {
+    const env = {
+      ALLOW_INSECURE_RPC: "true",
+      NETWORK: "mainnet",
+    } as NodeJS.ProcessEnv;
+
+    expect(() => validateKeeperEnvGuards(env)).toThrow(
+      "ALLOW_INSECURE_RPC=true is not permitted when NETWORK=mainnet"
+    );
+  });
+
+  it("does not throw when ALLOW_INSECURE_RPC=true on devnet", () => {
+    const env = {
+      ALLOW_INSECURE_RPC: "true",
+      NETWORK: "devnet",
+    } as NodeJS.ProcessEnv;
+
+    expect(() => validateKeeperEnvGuards(env)).not.toThrow();
+  });
 });
