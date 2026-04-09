@@ -46,15 +46,65 @@ import {
 } from "@percolatorct/sdk";
 import {
   getConnection,
+  getFallbackConnection,
   loadKeypair,
   sendWithRetryKeeper,
   createLogger,
   sendWarningAlert,
   sendCriticalAlert,
+  acquireToken,
+  backoffMs,
+  getErrorMessage,
 } from "@percolator/shared";
 import type { MarketCrankState } from "./crank-types.js";
 
 const logger = createLogger("keeper:adl");
+
+// ─── H4: RPC resilience helpers ───────────────────────────────────────────
+
+const RPC_TIMEOUT_MS = 15_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label}: timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+async function fetchSlabWithRetry(slabPubkey: PublicKey | string): Promise<Uint8Array> {
+  const pubkey = typeof slabPubkey === "string" ? new PublicKey(slabPubkey) : slabPubkey;
+  const maxRetries = 2;
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const conn = attempt === 0 ? getConnection() : getFallbackConnection();
+    try {
+      await acquireToken();
+      return await withTimeout(
+        fetchSlab(conn, pubkey),
+        RPC_TIMEOUT_MS,
+        `fetchSlab(${pubkey.toBase58()})`,
+      );
+    } catch (err) {
+      lastErr = err;
+      const msg = getErrorMessage(err).toLowerCase();
+      const isRetryable = msg.includes("429") || msg.includes("too many requests")
+        || msg.includes("rate limit") || msg.includes("timeout")
+        || msg.includes("socket") || msg.includes("econnrefused")
+        || msg.includes("502") || msg.includes("503");
+      if (!isRetryable || attempt >= maxRetries - 1) break;
+      const delay = backoffMs(attempt, 500, 4_000);
+      logger.warn("ADL fetchSlab retrying", {
+        slabAddress: pubkey.toBase58(),
+        attempt: attempt + 1,
+        delayMs: Math.round(delay),
+        error: msg.slice(0, 120),
+      });
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  throw lastErr;
+}
 
 // ─── tunables ──────────────────────────────────────────────────────────────
 
@@ -311,11 +361,9 @@ export class AdlService {
    * Used by the /api/adl/rankings API endpoint.
    */
   async getAdlState(slabAddress: string, market: DiscoveredMarket): Promise<AdlTriggerState> {
-    const connection = getConnection();
-
     let data: Uint8Array;
     try {
-      data = await fetchSlab(connection, market.slabAddress);
+      data = await fetchSlabWithRetry(market.slabAddress);
     } catch (err) {
       throw new Error(`fetchSlab failed for ${slabAddress}: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -352,13 +400,12 @@ export class AdlService {
    * Returns number of ExecuteAdl transactions sent (0 if ADL not needed).
    */
   async scanMarket(slabAddress: string, market: DiscoveredMarket): Promise<number> {
-    const connection = getConnection();
     const keypair = this._keypair;
     const programId = market.programId;
 
     let data: Uint8Array;
     try {
-      data = await fetchSlab(connection, market.slabAddress);
+      data = await fetchSlabWithRetry(market.slabAddress);
     } catch (err) {
       logger.warn("ADL: fetchSlab failed", {
         slabAddress,
@@ -460,7 +507,7 @@ export class AdlService {
         ]);
         const ix = buildIx({ programId, keys: adlKeys, data: adlData });
 
-        const sig = await sendWithRetryKeeper(connection, [ix], [keypair]);
+        const sig = await sendWithRetryKeeper(getConnection(), [ix], [keypair]);
 
         logger.info("ADL tx sent", {
           slabAddress,

@@ -33,6 +33,7 @@ vi.mock("@percolatorct/sdk", () => ({
 
 vi.mock("@percolator/shared", () => ({
   getConnection: vi.fn(() => ({})),
+  getFallbackConnection: vi.fn(() => ({})),
   loadKeypair: vi.fn(() => ({
     publicKey: {
       toBase58: () => "keeperPubkey1111111111111111111111111111111",
@@ -49,6 +50,9 @@ vi.mock("@percolator/shared", () => ({
   })),
   sendWarningAlert: vi.fn(async () => {}),
   sendCriticalAlert: vi.fn(async () => {}),
+  acquireToken: vi.fn(async () => {}),
+  backoffMs: vi.fn((attempt: number, base: number) => base * Math.pow(2, attempt)),
+  getErrorMessage: vi.fn((e: unknown) => (e instanceof Error ? e.message : String(e))),
 }));
 
 // ─── import (after mocks) ─────────────────────────────────────────────────────
