@@ -63,9 +63,9 @@ export class OracleService {
   private readonly maxTrackedMarkets = 500;
   // BM2: Deduplicate concurrent requests for the same mint
   private inFlightRequests = new Map<string, Promise<bigint | null>>();
-  // Track consecutive single-source fetches to detect degraded cross-validation
-  private _consecutiveSingleSource = 0;
-  private _singleSourceAlertSent = false;
+  // M8: Track consecutive single-source fetches per slab (not global)
+  private _consecutiveSingleSource = new Map<string, number>();
+  private _singleSourceAlertSent = new Set<string>();
   private static readonly SINGLE_SOURCE_ALERT_THRESHOLD = 10;
   // M-4: Track when an external source (DexScreener or Jupiter) last returned a
   // valid price for each slab. Used to cap the on-chain fallback duration so that
@@ -223,34 +223,41 @@ export class OracleService {
       }
     }
 
-    // Track cross-validation coverage: alert when single-source mode persists
+    // M8: Track cross-validation coverage per slab, not globally.
+    // A global counter was reset by any market getting dual-source,
+    // masking degradation for markets stuck on single-source.
     const bothAvailable = dexPrice !== null && jupPrice !== null;
     if (bothAvailable) {
-      if (this._consecutiveSingleSource > 0) {
+      const prev = this._consecutiveSingleSource.get(slabAddress) ?? 0;
+      if (prev > 0) {
         logger.info("Cross-source validation restored", {
-          previousSingleSourceCount: this._consecutiveSingleSource,
+          slabAddress,
+          previousSingleSourceCount: prev,
         });
       }
-      this._consecutiveSingleSource = 0;
-      this._singleSourceAlertSent = false;
+      this._consecutiveSingleSource.set(slabAddress, 0);
+      this._singleSourceAlertSent.delete(slabAddress);
     } else if (dexPrice !== null || jupPrice !== null) {
-      this._consecutiveSingleSource++;
+      const count = (this._consecutiveSingleSource.get(slabAddress) ?? 0) + 1;
+      this._consecutiveSingleSource.set(slabAddress, count);
       const degradedSource = dexPrice !== null ? "dexscreener" : "jupiter";
       const downSource = dexPrice !== null ? "jupiter" : "dexscreener";
       if (
-        this._consecutiveSingleSource >= OracleService.SINGLE_SOURCE_ALERT_THRESHOLD &&
-        !this._singleSourceAlertSent
+        count >= OracleService.SINGLE_SOURCE_ALERT_THRESHOLD &&
+        !this._singleSourceAlertSent.has(slabAddress)
       ) {
-        this._singleSourceAlertSent = true;
+        this._singleSourceAlertSent.add(slabAddress);
         logger.warn("Cross-source validation degraded — operating on single source", {
-          consecutiveSingleSource: this._consecutiveSingleSource,
+          slabAddress,
+          consecutiveSingleSource: count,
           activeSource: degradedSource,
           downSource,
         });
         sendWarningAlert("Oracle cross-validation degraded", [
+          { name: "Market", value: slabAddress.slice(0, 12), inline: true },
           { name: "Active Source", value: degradedSource, inline: true },
           { name: "Down Source", value: downSource, inline: true },
-          { name: "Consecutive", value: String(this._consecutiveSingleSource), inline: true },
+          { name: "Consecutive", value: String(count), inline: true },
         ])?.catch(() => {});
       }
     }

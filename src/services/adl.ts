@@ -438,6 +438,7 @@ export class AdlService {
 
     let sent = 0;
     let remainingExcess = excess;
+    let scanHadError = false;
 
     for (const pos of ranked) {
       if (sent >= ADL_MAX_TX_PER_SCAN) {
@@ -481,29 +482,25 @@ export class AdlService {
           targetIdx: pos.idx,
           error: errMsg,
         });
-
-        const state = this._getOrCreateState(slabAddress);
-        state.consecutiveErrors++;
-
-        if (state.consecutiveErrors >= 3) {
-          await sendWarningAlert("ADL consecutive failures", [
-            { name: "Market", value: slabAddress.slice(0, 12), inline: true },
-            {
-              name: "Consecutive Errors",
-              value: state.consecutiveErrors.toString(),
-              inline: true,
-            },
-            { name: "Error", value: errMsg.slice(0, 100), inline: false },
-          ]).catch(() => {});
-        }
+        scanHadError = true;
         // Continue to next position — one failure shouldn't abort the whole run.
       }
     }
 
+    // M14: Track errors at scan level, not per-position. The counter means
+    // "consecutive scans with zero successes" rather than individual tx failures.
+    const state = this._getOrCreateState(slabAddress);
     if (sent > 0) {
-      const state = this._getOrCreateState(slabAddress);
       state.adlTxSent += sent;
       state.consecutiveErrors = 0;
+    } else if (scanHadError) {
+      state.consecutiveErrors++;
+      if (state.consecutiveErrors >= 3) {
+        await sendWarningAlert("ADL consecutive scan failures", [
+          { name: "Market", value: slabAddress.slice(0, 12), inline: true },
+          { name: "Consecutive Failed Scans", value: state.consecutiveErrors.toString(), inline: true },
+        ]).catch(() => {});
+      }
     }
 
     return sent;
