@@ -131,6 +131,10 @@ export class CrankService {
   private _stalePauseCheck?: (slabAddress: string) => boolean;
   // P1 FIX: Cache keypair at construction — was reading from disk on every crank cycle (every 30s)
   private readonly _keypair = loadKeypair(process.env.CRANK_KEYPAIR!);
+  // 6.2: Total crank cycles completed (exposed via getMetrics for health + MonitorService)
+  private _totalCrankCycles = 0;
+  // 6.2: Optional callback fired after each completed crank cycle
+  private _onCrankCycle?: () => void;
 
   constructor(oracleService: OracleService, intervalMs?: number) {
     this.oracleService = oracleService;
@@ -1053,10 +1057,18 @@ export class CrankService {
         }
         if (this.markets.size > 0) {
           const result = await this.crankAll();
+          // 6.2: Track total crank cycles for health metrics and MonitorService
+          this._totalCrankCycles++;
+          this._onCrankCycle?.();
           // Always log cycle result so operators can see the keeper is alive
-        if (result.failed > 0 || result.success > 0) {
-          logger.info("Crank cycle complete", { success: result.success, failed: result.failed, skipped: result.skipped });
-        }
+          if (result.failed > 0 || result.success > 0) {
+            logger.info("Crank cycle complete", {
+              success: result.success,
+              failed: result.failed,
+              skipped: result.skipped,
+              totalCycles: this._totalCrankCycles,
+            });
+          }
         }
       } catch (err) {
         logger.error("Crank cycle failed", { error: err });
@@ -1090,6 +1102,16 @@ export class CrankService {
 
   getLastCycleResult() {
     return this.lastCycleResult;
+  }
+
+  /** 6.2: Total completed crank cycles since service start. */
+  getTotalCrankCycles(): number {
+    return this._totalCrankCycles;
+  }
+
+  /** 6.2: Register a callback fired after each completed crank cycle. */
+  setOnCrankCycle(fn: () => void): void {
+    this._onCrankCycle = fn;
   }
 
   getMarkets(): Map<string, MarketCrankState> {

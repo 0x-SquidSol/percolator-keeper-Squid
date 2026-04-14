@@ -1,11 +1,12 @@
 import "dotenv/config";
 import http from "node:http";
 import { timingSafeEqual } from "node:crypto";
-import { config, createLogger, initSentry, captureException, sendInfoAlert, sendCriticalAlert, createServiceMonitors } from "@percolator/shared";
+import { config, createLogger, initSentry, captureException, sendInfoAlert, sendCriticalAlert, sendWarningAlert, createServiceMonitors, getConnection, loadKeypair } from "@percolator/shared";
 import { OracleService } from "./services/oracle.js";
 import { CrankService } from "./services/crank.js";
 import { LiquidationService } from "./services/liquidation.js";
 import { AdlService } from "./services/adl.js";
+import { MonitorService } from "./services/monitor.js";
 import { validateKeeperEnvGuards } from "./env-guards.js";
 import { isMainnet } from "./config/network.js";
 
@@ -40,6 +41,7 @@ logger.info("Keeper service starting");
 const oracleService = new OracleService();
 const crankService = new CrankService(oracleService);
 const liquidationService = new LiquidationService(oracleService);
+const monitorService = new MonitorService();
 
 // ADL service — gated by ADL_ENABLED=true env var until on-chain instruction
 // (PERC-8273 T8) is live and T10 devnet upgrade is done (PERC-8275).
@@ -62,6 +64,43 @@ const STALE_ALERT_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes → alert
 const STALE_PAUSE_THRESHOLD_MS = 10 * 60 * 1000; // 10 minutes → pause cranking
 const STARTUP_GRACE_MS = 5 * 60 * 1000; // 5 minutes grace on startup — avoids false alerts on every deploy
 const _keeperStartTime = Date.now();
+
+// SOL balance monitoring — checked every 60 seconds, alerts on Discord when < 0.05 SOL
+const SOL_BALANCE_WARN_THRESHOLD = 0.05; // SOL
+let _keeperSolBalanceLamports: number | null = null;
+let _lastSolBalanceAlertTime = 0;
+
+const solBalanceCheckInterval = setInterval(async () => {
+  try {
+    const keypair = loadKeypair(process.env.CRANK_KEYPAIR!);
+    const conn = getConnection();
+    const lamports = await conn.getBalance(keypair.publicKey);
+    _keeperSolBalanceLamports = lamports;
+    const solBalance = lamports / 1e9;
+
+    if (solBalance < SOL_BALANCE_WARN_THRESHOLD) {
+      // Rate-limit alerts to once per 5 minutes to avoid Discord spam
+      if (Date.now() - _lastSolBalanceAlertTime > 5 * 60 * 1000) {
+        _lastSolBalanceAlertTime = Date.now();
+        logger.warn("Keeper SOL balance below threshold", {
+          solBalance: solBalance.toFixed(4),
+          thresholdSol: SOL_BALANCE_WARN_THRESHOLD,
+          walletAddress: keypair.publicKey.toBase58(),
+        });
+        sendWarningAlert("Keeper wallet SOL balance low", [
+          { name: "Balance", value: `${solBalance.toFixed(4)} SOL`, inline: true },
+          { name: "Threshold", value: `${SOL_BALANCE_WARN_THRESHOLD} SOL`, inline: true },
+          { name: "Wallet", value: keypair.publicKey.toBase58().slice(0, 16) + "...", inline: false },
+        ]).catch(() => {});
+      }
+    }
+  } catch (err) {
+    logger.warn("Failed to fetch keeper SOL balance", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}, 60_000);
+solBalanceCheckInterval.unref();
 
 const staleCheckInterval = setInterval(() => {
   // Skip stale checks during startup grace period (GH#29 — false CRITICAL floods on deploy)
@@ -124,6 +163,9 @@ export function isMarketStalePaused(slabAddress: string): boolean {
 
 // Wire stale pause check into crank service
 crankService.setStalePauseCheck(isMarketStalePaused);
+
+// 6.2: Wire crank cycle counter into MonitorService so it can track ADL staleness
+crankService.setOnCrankCycle(() => monitorService.notifyCrankCycle());
 
 // Subscribe to crank events to track health
 crankService.getMarkets().forEach((_, slabAddress) => {
@@ -365,6 +407,10 @@ res.writeHead(401, secureJsonHeaders);
     const liqStatus = liquidationService.getStatus();
     const timeSinceLastLiqScanMs = liqStatus.lastScanTime > 0 ? now - liqStatus.lastScanTime : null;
 
+    const keeperSolBalance = _keeperSolBalanceLamports !== null
+      ? _keeperSolBalanceLamports / 1e9
+      : null;
+
     const healthData = {
       status,
       lastCrankTime: mostRecentCrank,
@@ -372,6 +418,11 @@ res.writeHead(401, secureJsonHeaders);
       marketsTracked,
       timeSinceLastCrankMs: timeSinceLastCrank === Infinity ? null : timeSinceLastCrank,
       timeSinceLastOracleMs: timeSinceLastOracle === Infinity ? null : timeSinceLastOracle,
+      keeperWallet: {
+        solBalance: keeperSolBalance,
+        belowThreshold: keeperSolBalance !== null && keeperSolBalance < SOL_BALANCE_WARN_THRESHOLD,
+        thresholdSol: SOL_BALANCE_WARN_THRESHOLD,
+      },
       liquidation: {
         running: liqStatus.running,
         scanCount: liqStatus.scanCount,
@@ -386,6 +437,8 @@ res.writeHead(401, secureJsonHeaders);
         scan: monitors.scan.getStatus(),
         oracle: monitors.oracle.getStatus(),
       },
+      // 6.1 + 6.2 + 6.3: conservation invariants, crank cycle count, ADL staleness
+      invariants: monitorService.getStatus(),
     };
     
     const statusCode = status === "down" ? 503 : 200; // "starting", "ok", "degraded" → 200
@@ -481,6 +534,8 @@ async function start() {
   logger.info("Crank service started");
   liquidationService.start(() => crankService.getMarkets());
   logger.info("Liquidation scanner started");
+  monitorService.start(() => crankService.getMarkets());
+  logger.info("MonitorService started (invariant + ADL staleness checks)");
 
   // ADL service — starts only when ADL_ENABLED=true and markets are discovered.
   // Depends on on-chain ExecuteAdl (tag 50) being live (T8/PERC-8273).
@@ -519,9 +574,11 @@ async function shutdown(signal: string): Promise<void> {
       { name: "Signal", value: signal, inline: true },
     ]);
     
-    // Stop stale oracle + liquidation checks
+    // Stop stale oracle + liquidation + SOL balance checks
     clearInterval(staleCheckInterval);
     clearInterval(liqStaleCheckInterval);
+    clearInterval(solBalanceCheckInterval);
+    monitorService.stop();
 
     // Close health server
     logger.info("Closing health server");
