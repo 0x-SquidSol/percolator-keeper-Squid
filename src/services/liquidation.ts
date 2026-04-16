@@ -248,29 +248,9 @@ export class LiquidationService {
           const notional = absBI(account.positionSize) * price / PRICE_E6_DIVISOR;
           if (notional === 0n) continue;
 
-          // Compute mark PnL from live price instead of stale on-chain pnl
-          const entryPrice = account.entryPrice;
-          let markPnl = 0n;
-          if (entryPrice > 0n && price > 0n) {
-            const diff = account.positionSize > 0n
-              ? price - entryPrice    // long: profit when price goes up
-              : entryPrice - price;   // short: profit when price goes down
-            
-            // BH5: Overflow protection - check bounds before multiplication
-            const MAX_SAFE_BIGINT = 9007199254740991n; // Number.MAX_SAFE_INTEGER
-            const absPosSize = absBI(account.positionSize);
-            
-            // Check if multiplication would overflow
-            if (diff > 0n && absPosSize > MAX_SAFE_BIGINT / diff) {
-              logger.warn("PnL calculation overflow", { accountIndex: i, slabAddress });
-              markPnl = diff > 0n ? MAX_SAFE_BIGINT : -MAX_SAFE_BIGINT;
-            } else if (diff < 0n && absPosSize > MAX_SAFE_BIGINT / -diff) {
-              logger.warn("PnL calculation overflow", { accountIndex: i, slabAddress });
-              markPnl = -MAX_SAFE_BIGINT;
-            } else {
-              markPnl = (diff * absPosSize) / price;
-            }
-          }
+          // v12.17: entryPrice is always 0n (removed from on-chain struct).
+          // Use account.pnl directly — it is always populated and accurate.
+          const markPnl = account.pnl;
           const equity = account.capital + markPnl;
 
           // H4: If equity <= 0, definitely liquidatable (skip ratio calc)
@@ -382,7 +362,7 @@ export class LiquidationService {
       }
 
       // 2. Crank (make sure engine state is fresh)
-      const crankData = encodeKeeperCrank({ callerIdx: 65535, allowPanic: false });
+      const crankData = encodeKeeperCrank({ callerIdx: 65535 });
       const crankKeys = buildAccountMetas(ACCOUNTS_KEEPER_CRANK, [
         keypair.publicKey, slabAddress, SYSVAR_CLOCK_PUBKEY, oracleAccount,
       ]);
@@ -425,15 +405,9 @@ export class LiquidationService {
         if (freshPrice > 0n) {
           const notional = absBI(freshAccount.positionSize) * freshPrice / PRICE_E6_DIVISOR;
           if (notional > 0n) {
-            // Use mark-to-market PnL for re-verification
-            const freshEntry = freshAccount.entryPrice;
-            let freshMarkPnl = 0n;
-            if (freshEntry > 0n && freshPrice > 0n) {
-              const diff = freshAccount.positionSize > 0n
-                ? freshPrice - freshEntry
-                : freshEntry - freshPrice;
-              freshMarkPnl = (diff * absBI(freshAccount.positionSize)) / freshPrice;
-            }
+            // v12.17: entryPrice is always 0n (removed from on-chain struct).
+            // Use freshAccount.pnl directly for re-verification.
+            const freshMarkPnl = freshAccount.pnl;
             const equity = freshAccount.capital + freshMarkPnl;
             if (equity > 0n) {
               const marginRatioBps = equity * BPS_MULTIPLIER / notional;

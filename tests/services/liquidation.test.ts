@@ -236,6 +236,7 @@ describe('LiquidationService', () => {
         positionSize: 10_000_000_000n, // 10,000 units (6 decimals)
         capital: 100_000_000n, // 100 USDC
         entryPrice: 1_000_000n,
+        pnl: 0n,
       } as any);
 
       const candidates = await liquidationService.scanMarket(mockMarket as any);
@@ -288,6 +289,7 @@ describe('LiquidationService', () => {
         positionSize: 10_000_000_000n,
         capital: 100_000_000n,
         entryPrice: 1_000_000n,
+        pnl: 0n,
       } as any);
 
       const candidates = await liquidationService.scanMarket(mockMarket as any);
@@ -337,6 +339,7 @@ describe('LiquidationService', () => {
         positionSize: 10_000_000_000n,
         capital: 100_000_000n,
         entryPrice: 1_000_000n,
+        pnl: 0n,
       } as any);
 
       const candidates = await liquidationService.scanMarket(mockMarket as any);
@@ -418,6 +421,7 @@ describe('LiquidationService', () => {
         positionSize: 10_000_000_000n,
         capital: 1_000_000n,
         entryPrice: 1_000_000n,
+        pnl: 0n,
       } as any);
 
       const signature = await liquidationService.liquidate(mockMarket as any, 0);
@@ -460,6 +464,7 @@ describe('LiquidationService', () => {
         positionSize: 10_000_000_000n,
         capital: 1_000_000n,
         entryPrice: 1_000_000n,
+        pnl: 0n,
       } as any);
 
       const statusBefore = liquidationService.getStatus();
@@ -518,6 +523,7 @@ describe('LiquidationService', () => {
         positionSize: 10_000_000_000n,
         capital: 1_000_000n,
         entryPrice: 1_000_000n,
+        pnl: 0n,
       } as any);
 
       const result = await liquidationService.liquidate(mockMarket as any, 1);
@@ -567,6 +573,7 @@ describe('LiquidationService', () => {
         positionSize: 10_000_000_000n,
         capital: 1_000_000n,
         entryPrice: 1_000_000n,
+        pnl: 0n,
       } as any);
 
       // First liquidation attempt → 0x4 → marked as permanently skipped

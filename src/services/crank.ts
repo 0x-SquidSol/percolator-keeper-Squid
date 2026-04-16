@@ -561,7 +561,7 @@ export class CrankService {
         }
 
         // Crank instruction (always — handles funding, liquidation, GC)
-        const crankData = encodeKeeperCrank({ callerIdx: 65535, allowPanic: false });
+        const crankData = encodeKeeperCrank({ callerIdx: 65535 });
         const oracleKey = market.slabAddress; // HYPERP: oracle account is the slab itself
         const crankKeys = buildAccountMetas(ACCOUNTS_KEEPER_CRANK, [
           keypair.publicKey,
@@ -641,7 +641,7 @@ export class CrankService {
       }
 
       // Crank instruction
-      const crankData = encodeKeeperCrank({ callerIdx: 65535, allowPanic: false });
+      const crankData = encodeKeeperCrank({ callerIdx: 65535 });
 
       let oracleKey: PublicKey;
       if (this.isAdminOracle(market)) {
